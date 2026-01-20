@@ -19,28 +19,29 @@ from collections import defaultdict
 from pathlib import Path
 
 
-def hash_file(filepath: Path, chunk_size: int = 65536) -> str | None:
+def hash_file(filepath: Path, algorithm: str = 'blake2b', chunk_size: int = 65536) -> str | None:
     """
-    Compute SHA256 hash of a file.
+    Compute hash of a file.
 
     Args:
         filepath: Path to the file to hash
+        algorithm: Hash algorithm to use (default: blake2b)
         chunk_size: Size of chunks to read (default 64KB)
 
     Returns:
-        Hex digest of the file's SHA256 hash, or None if file couldn't be read
+        Hex digest of the file's hash, or None if file couldn't be read
     """
-    sha256 = hashlib.sha256()
+    hasher = hashlib.new(algorithm)
     try:
         with open(filepath, 'rb') as f:
             while chunk := f.read(chunk_size):
-                sha256.update(chunk)
-        return sha256.hexdigest()
+                hasher.update(chunk)
+        return hasher.hexdigest()
     except (IOError, OSError, PermissionError):
         return None
 
 
-def find_duplicates(root_path: Path, verbose: bool = False) -> dict[Path, tuple[int, int]]:
+def find_duplicates(root_path: Path, algorithm: str = 'blake2b', verbose: bool = False) -> dict[Path, tuple[int, int]]:
     """
     Walk directory tree and find directories with duplicate files.
 
@@ -71,7 +72,7 @@ def find_duplicates(root_path: Path, verbose: bool = False) -> dict[Path, tuple[
                 continue
 
             if file_path.is_file():
-                file_hash = hash_file(file_path)
+                file_hash = hash_file(file_path, algorithm)
                 if file_hash:
                     file_hashes[file_hash].append(file_path)
                     dir_files[dir_path].append(file_hash)
@@ -119,6 +120,12 @@ def main():
         help='Directory to scan (default: current directory)'
     )
     parser.add_argument(
+        '-a', '--algorithm',
+        default='blake2b',
+        choices=['md5', 'sha1', 'sha256', 'blake2b', 'blake2s'],
+        help='Hash algorithm to use (default: blake2b)'
+    )
+    parser.add_argument(
         '-v', '--verbose',
         action='store_true',
         help='Show progress information'
@@ -144,7 +151,7 @@ def main():
     if not args.quiet:
         print(f"Scanning {root}...", file=sys.stderr)
 
-    dir_stats = find_duplicates(root, verbose=args.verbose)
+    dir_stats = find_duplicates(root, algorithm=args.algorithm, verbose=args.verbose)
 
     if not dir_stats:
         if not args.quiet:

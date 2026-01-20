@@ -14,12 +14,13 @@ Or just copy `redundir` anywhere in your `$PATH`. Requires Python 3.10+ with no 
 ## Usage
 
 ```
-redundir [directory] [-v] [-q]
+redundir [directory] [-a ALGORITHM] [-v] [-q]
 ```
 
 | Option | Description |
 |--------|-------------|
 | `directory` | Directory to scan (default: `.`) |
+| `-a, --algorithm` | Hash algorithm: `md5`, `sha1`, `sha256`, `blake2b`, `blake2s` (default: `blake2b`) |
 | `-v, --verbose` | Show scan progress |
 | `-q, --quiet` | Suppress status messages |
 
@@ -37,7 +38,7 @@ Found 3 directories with duplicate files.
 
 ## How It Works
 
-1. Recursively scans all files and computes SHA256 hashes
+1. Recursively scans all files and computes hashes (BLAKE2b by default for speed)
 2. Identifies duplicates (files with identical content anywhere in the tree)
 3. Calculates each directory's **redundancy score**: `duplicate_files / total_files`
 4. Outputs directories sorted by score (most redundant first)
