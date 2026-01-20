@@ -76,6 +76,7 @@ class RedundirTUI:
         self.bottom_selected_idx = 0
         self.active_pane = 'top'  # 'top' or 'bottom'
         self.last_bottom_dir_idx = None  # Track which directory's details we're showing
+        self.show_quit_message = False  # Show "press q to quit" message
 
         # Data will be populated by scan()
         self.sorted_dirs = []
@@ -168,9 +169,17 @@ class RedundirTUI:
             win.attroff(curses.A_BOLD)
 
         # Title
-        title = f" Directories With Redundancies: {len(self.sorted_dirs)} "
+        title = f" Directories with Redundancy ({len(self.sorted_dirs)}) "
         title_attr = curses.A_BOLD | curses.A_REVERSE if self.active_pane == 'top' else curses.A_BOLD
         win.addstr(0, 2, title, title_attr)
+
+        # Show quit message if needed
+        if self.show_quit_message:
+            msg = " Press 'q' to quit "
+            try:
+                win.addstr(height - 1, width - len(msg) - 1, msg, curses.A_REVERSE | curses.A_BOLD)
+            except curses.error:
+                pass
 
         # Calculate column width for count
         max_count_width = max(
@@ -310,6 +319,11 @@ class RedundirTUI:
         curses.curs_set(0)  # Hide cursor
         stdscr.clear()
 
+        # Set escape delay to 25ms to make ESC key responsive
+        # (curses waits to see if ESC is part of an escape sequence)
+        if hasattr(curses, 'set_escdelay'):
+            curses.set_escdelay(25)
+
         # Initialize colors if available
         if curses.has_colors():
             curses.init_pair(1, curses.COLOR_WHITE, curses.COLOR_BLUE)
@@ -363,10 +377,37 @@ class RedundirTUI:
                     self.active_pane = 'top'
                 continue
 
-            # Navigation keys
-            if key in (ord('q'), ord('Q'), 27):  # q, Q, or ESC
+            # Return key - switch from top to bottom pane
+            if key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
+                if self.active_pane == 'top':
+                    # Switch to bottom pane
+                    self.active_pane = 'bottom'
+                    if self.last_bottom_dir_idx != self.selected_idx:
+                        if hasattr(self, 'bottom_selectable_indices') and self.bottom_selectable_indices:
+                            self.bottom_selected_idx = self.bottom_selectable_indices[0]
+                        else:
+                            self.bottom_selected_idx = 0
+                        self.bottom_offset = 0
+                        self.last_bottom_dir_idx = self.selected_idx
+                    self.show_quit_message = False
+                continue
+
+            # Escape key - context-sensitive behavior
+            if key == 27:  # ESC
+                if self.active_pane == 'bottom':
+                    # Switch to top pane
+                    self.active_pane = 'top'
+                    self.show_quit_message = False
+                else:  # top pane
+                    # Show quit message
+                    self.show_quit_message = True
+                continue
+
+            # Q key - quit immediately
+            if key in (ord('q'), ord('Q')):
                 break
             elif key in (curses.KEY_UP, ord('k')):
+                self.show_quit_message = False
                 if self.active_pane == 'top':
                     if self.selected_idx > 0:
                         self.selected_idx -= 1
@@ -384,6 +425,7 @@ class RedundirTUI:
                             if self.bottom_selected_idx < self.bottom_offset:
                                 self.bottom_offset = self.bottom_selected_idx
             elif key in (curses.KEY_DOWN, ord('j')):
+                self.show_quit_message = False
                 if self.active_pane == 'top':
                     if self.selected_idx < len(self.sorted_dirs) - 1:
                         self.selected_idx += 1
@@ -403,6 +445,7 @@ class RedundirTUI:
                             if self.bottom_selected_idx >= self.bottom_offset + display_height:
                                 self.bottom_offset = self.bottom_selected_idx - display_height + 1
             elif key == curses.KEY_PPAGE:  # Page Up
+                self.show_quit_message = False
                 if self.active_pane == 'top':
                     self.selected_idx = max(0, self.selected_idx - (top_height - 2))
                     self.top_offset = max(0, self.top_offset - (top_height - 2))
@@ -414,6 +457,7 @@ class RedundirTUI:
                         self.bottom_selected_idx = self.bottom_selectable_indices[new_pos]
                         self.bottom_offset = max(0, self.bottom_selected_idx - (bottom_height - 2))
             elif key in (curses.KEY_NPAGE, 6):  # Page Down or Ctrl-F
+                self.show_quit_message = False
                 if self.active_pane == 'top':
                     display_height = top_height - 2
                     self.selected_idx = min(len(self.sorted_dirs) - 1, self.selected_idx + display_height)
@@ -429,6 +473,7 @@ class RedundirTUI:
                         if self.bottom_selected_idx >= self.bottom_offset + display_height:
                             self.bottom_offset = self.bottom_selected_idx - display_height + 1
             elif key == 2:  # Ctrl-B
+                self.show_quit_message = False
                 if self.active_pane == 'top':
                     self.selected_idx = max(0, self.selected_idx - (top_height - 2))
                     self.top_offset = max(0, self.top_offset - (top_height - 2))
@@ -440,6 +485,7 @@ class RedundirTUI:
                         self.bottom_selected_idx = self.bottom_selectable_indices[new_pos]
                         self.bottom_offset = max(0, self.bottom_selected_idx - (bottom_height - 2))
             elif key == curses.KEY_HOME:
+                self.show_quit_message = False
                 if self.active_pane == 'top':
                     self.selected_idx = 0
                     self.top_offset = 0
@@ -451,6 +497,7 @@ class RedundirTUI:
                         self.bottom_selected_idx = 0
                     self.bottom_offset = 0
             elif key == curses.KEY_END:
+                self.show_quit_message = False
                 if self.active_pane == 'top':
                     self.selected_idx = len(self.sorted_dirs) - 1
                     display_height = top_height - 2
