@@ -14,7 +14,7 @@ Or just copy `redundir` anywhere in your `$PATH`. Requires Python 3.10+ with no 
 ## Usage
 
 ```
-redundir [directory] [-a ALGORITHM] [-j N] [-q]
+redundir [directory] [-a ALGORITHM] [-j N] [-v] [-q]
 ```
 
 | Option | Description |
@@ -22,6 +22,7 @@ redundir [directory] [-a ALGORITHM] [-j N] [-q]
 | `directory` | Directory to scan (default: `.`) |
 | `-a, --algorithm` | Hash algorithm: `md5`, `sha1`, `sha256`, `blake2b`, `blake2s` (default: `blake2b`) |
 | `-j, --jobs` | Number of parallel hashing jobs (default: `4`, use `1` to disable) |
+| `-v, --verbose` | Show related directories and hypothetical redundancy scores |
 | `-q, --quiet` | Suppress progress messages |
 
 ## Example
@@ -31,15 +32,28 @@ $ redundir ~/Documents
 Scanning /home/user/Documents...
   Collecting files...
   Found 1523 files
-  Need to hash 412 files (skipped 1111 unique sizes)
-  Hashed 412 total files
-  Found 89 unique duplicate content hashes
+  Hashing 412 files, skipping 1111 files with unique sizes
+  Hashed 412 files
+  Found 89 duplicate files in 3 directories (overall redundancy: 21.60%)
+
 100.00%  4/4  backups/old
  75.00%  3/4  photos/2023
  66.67%  2/3  projects/archive
-
-Found 3 directories with duplicate files.
 ```
+
+### Verbose Mode
+
+With `-v`, each directory shows related directories that share files with it, along with their **hypothetical redundancy** - the redundancy they would have if the current directory didn't exist:
+
+```
+$ redundir ~/Documents -v
+...
+100.00%  4/4  backups/old
+      0.00%  0/4  backups/new
+     50.00%  2/4  photos/2023
+```
+
+This shows that if `backups/old` was removed, `backups/new` would have 0% redundancy (all its duplicates were with `old`), while `photos/2023` would still have 50% redundancy (duplicates exist elsewhere too).
 
 ## How It Works
 

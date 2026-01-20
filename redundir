@@ -48,7 +48,7 @@ def _hash_file_worker(args):
     return filepath, hash_file(filepath, algorithm)
 
 
-def find_duplicates(root_path: Path, algorithm: str = 'blake2b', jobs: int = 4, quiet: bool = False) -> dict[Path, tuple[int, int]]:
+def find_duplicates(root_path: Path, algorithm: str = 'blake2b', jobs: int = 4, quiet: bool = False):
     """
     Walk directory tree and find directories with duplicate files.
 
@@ -62,7 +62,7 @@ def find_duplicates(root_path: Path, algorithm: str = 'blake2b', jobs: int = 4, 
         quiet: If True, suppress progress information
 
     Returns:
-        Dict mapping directory path to (duplicate_count, total_count)
+        Tuple of (dir_stats, total_duplicates, total_files, file_to_hash, hash_to_dirs, dir_all_files)
     """
     # First pass: collect all files and group by size
     size_groups: dict[int, list[Path]] = defaultdict(list)
@@ -153,7 +153,14 @@ def find_duplicates(root_path: Path, algorithm: str = 'blake2b', jobs: int = 4, 
         if duplicates > 0:
             dir_stats[dir_path] = (duplicates, total)
 
-    return dir_stats, total_duplicates, total_files
+    # Build hash to directories map for verbose mode
+    hash_to_dirs: dict[str, set[Path]] = defaultdict(set)
+    for hash_val, paths in file_hashes.items():
+        if hash_val in duplicate_hashes:
+            for path in paths:
+                hash_to_dirs[hash_val].add(path.parent)
+
+    return dir_stats, total_duplicates, total_files, file_to_hash, hash_to_dirs, dir_all_files
 
 
 def calculate_redundancy_score(duplicates: int, total: int) -> float:
@@ -187,6 +194,11 @@ def main():
         help='Number of parallel hashing jobs (default: 4, use 1 to disable)'
     )
     parser.add_argument(
+        '-v', '--verbose',
+        action='store_true',
+        help='Show related directories for each result'
+    )
+    parser.add_argument(
         '-q', '--quiet',
         action='store_true',
         help='Suppress progress messages'
@@ -207,7 +219,7 @@ def main():
     if not args.quiet:
         print(f"Scanning {root}...", file=sys.stderr)
 
-    dir_stats, total_duplicates, total_files = find_duplicates(root, algorithm=args.algorithm, jobs=args.jobs, quiet=args.quiet)
+    dir_stats, total_duplicates, total_files, file_to_hash, hash_to_dirs, dir_all_files = find_duplicates(root, algorithm=args.algorithm, jobs=args.jobs, quiet=args.quiet)
 
     # Print summary before results
     if not args.quiet:
@@ -251,6 +263,72 @@ def main():
         # Format percentage with proper alignment (right-align to 7 chars including %)
         percent_str = f"{score:7.2%}"
         print(f"{percent_str}  {count_str:>{max_count_width}}  {display_path}")
+
+        # Verbose mode: show related directories
+        if args.verbose:
+            # Find the actual directory path from display_path
+            dir_path = None
+            for dp, _ in sorted_dirs:
+                try:
+                    rel = dp.relative_to(root)
+                    if str(rel if str(rel) != '.' else '.') == str(display_path):
+                        dir_path = dp
+                        break
+                except ValueError:
+                    if dp == display_path:
+                        dir_path = dp
+                        break
+
+            if dir_path:
+                # Find all hashes in this directory
+                dir_hashes = set()
+                for fpath in dir_all_files.get(dir_path, []):
+                    if fpath in file_to_hash:
+                        dir_hashes.add(file_to_hash[fpath])
+
+                # Find related directories (directories that share at least one hash with this dir)
+                related_dirs = set()
+                for h in dir_hashes:
+                    for d in hash_to_dirs[h]:
+                        if d != dir_path:
+                            related_dirs.add(d)
+
+                # Calculate hypothetical redundancy for each related directory
+                related_info = []
+                for related_dir in related_dirs:
+                    related_files = dir_all_files.get(related_dir, [])
+                    total_related = len(related_files)
+
+                    # Count duplicates in related_dir if dir_path didn't exist
+                    hypothetical_duplicates = 0
+                    for fpath in related_files:
+                        if fpath in file_to_hash:
+                            h = file_to_hash[fpath]
+                            # Count how many OTHER directories (excluding dir_path and related_dir) have this hash
+                            other_dirs = hash_to_dirs[h] - {dir_path, related_dir}
+                            # If there are other directories with this hash, it's still a duplicate
+                            if len(other_dirs) > 0:
+                                hypothetical_duplicates += 1
+
+                    hyp_score = calculate_redundancy_score(hypothetical_duplicates, total_related)
+
+                    # Convert to relative path
+                    try:
+                        rel_path = related_dir.relative_to(root)
+                        rel_display = rel_path if str(rel_path) != '.' else '.'
+                    except ValueError:
+                        rel_display = related_dir
+
+                    related_info.append((hyp_score, hypothetical_duplicates, total_related, rel_display))
+
+                # Sort by hypothetical redundancy score (descending)
+                related_info.sort(key=lambda x: (-x[0], str(x[3])))
+
+                # Print related directories
+                for hyp_score, hyp_dup, hyp_total, rel_display in related_info:
+                    hyp_percent = f"{hyp_score:7.2%}"
+                    hyp_count = f"{hyp_dup}/{hyp_total}"
+                    print(f"    {hyp_percent}  {hyp_count:>{max_count_width}}  {rel_display}")
 
 
 if __name__ == '__main__':
