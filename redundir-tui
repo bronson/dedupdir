@@ -167,7 +167,7 @@ class RedundirTUI:
             win.attroff(curses.A_BOLD)
 
         # Title
-        title = f" Redundant Directories ({len(self.sorted_dirs)}) "
+        title = f" Directories With Redundancies: {len(self.sorted_dirs)} "
         title_attr = curses.A_BOLD | curses.A_REVERSE if self.active_pane == 'top' else curses.A_BOLD
         win.addstr(0, 2, title, title_attr)
 
