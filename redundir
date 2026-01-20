@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+"""
+redundir - Find directories containing duplicate files
+
+This utility recursively walks a directory tree looking for directories
+containing duplicate files. It prints a list of directories found that
+contain duplicate files, along with their redundancy score, sorted by
+redundancy score (most redundant first).
+
+The redundancy score for each directory is:
+    number of duplicate files / number of files in the directory
+"""
+
+import argparse
+import hashlib
+import os
+import sys
+from collections import defaultdict
+from pathlib import Path
+
+
+def hash_file(filepath: Path, chunk_size: int = 65536) -> str | None:
+    """
+    Compute SHA256 hash of a file.
+
+    Args:
+        filepath: Path to the file to hash
+        chunk_size: Size of chunks to read (default 64KB)
+
+    Returns:
+        Hex digest of the file's SHA256 hash, or None if file couldn't be read
+    """
+    sha256 = hashlib.sha256()
+    try:
+        with open(filepath, 'rb') as f:
+            while chunk := f.read(chunk_size):
+                sha256.update(chunk)
+        return sha256.hexdigest()
+    except (IOError, OSError, PermissionError):
+        return None
+
+
+def find_duplicates(root_path: Path, verbose: bool = False) -> dict[Path, tuple[int, int]]:
+    """
+    Walk directory tree and find directories with duplicate files.
+
+    A file is considered a duplicate if another file with the same content
+    (same hash) exists anywhere in the scanned tree.
+
+    Args:
+        root_path: Root directory to scan
+        verbose: If True, print progress information
+
+    Returns:
+        Dict mapping directory path to (duplicate_count, total_count)
+    """
+    # First pass: hash all files and track their locations
+    file_hashes: dict[str, list[Path]] = defaultdict(list)
+    dir_files: dict[Path, list[str]] = defaultdict(list)  # dir -> list of hashes
+
+    file_count = 0
+
+    for dirpath, dirnames, filenames in os.walk(root_path):
+        dir_path = Path(dirpath)
+
+        for filename in filenames:
+            file_path = dir_path / filename
+
+            # Skip symlinks to avoid counting the same file multiple times
+            if file_path.is_symlink():
+                continue
+
+            if file_path.is_file():
+                file_hash = hash_file(file_path)
+                if file_hash:
+                    file_hashes[file_hash].append(file_path)
+                    dir_files[dir_path].append(file_hash)
+                    file_count += 1
+
+                    if verbose and file_count % 1000 == 0:
+                        print(f"  Scanned {file_count} files...", file=sys.stderr)
+
+    if verbose:
+        print(f"  Scanned {file_count} total files", file=sys.stderr)
+
+    # Find hashes that appear more than once (duplicates)
+    duplicate_hashes = {h for h, paths in file_hashes.items() if len(paths) > 1}
+
+    if verbose:
+        print(f"  Found {len(duplicate_hashes)} unique duplicate content hashes", file=sys.stderr)
+
+    # Calculate redundancy for each directory
+    dir_stats: dict[Path, tuple[int, int]] = {}
+
+    for dir_path, hashes in dir_files.items():
+        total = len(hashes)
+        duplicates = sum(1 for h in hashes if h in duplicate_hashes)
+        if duplicates > 0:
+            dir_stats[dir_path] = (duplicates, total)
+
+    return dir_stats
+
+
+def calculate_redundancy_score(duplicates: int, total: int) -> float:
+    """Calculate redundancy score as a ratio of duplicates to total files."""
+    return duplicates / total if total > 0 else 0.0
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog='redundir',
+        description='Find directories containing duplicate files and report redundancy scores.',
+        epilog='The redundancy score is: (duplicate files in dir) / (total files in dir)'
+    )
+    parser.add_argument(
+        'directory',
+        nargs='?',
+        default='.',
+        help='Directory to scan (default: current directory)'
+    )
+    parser.add_argument(
+        '-v', '--verbose',
+        action='store_true',
+        help='Show progress information'
+    )
+    parser.add_argument(
+        '-q', '--quiet',
+        action='store_true',
+        help='Suppress the "Scanning..." message'
+    )
+
+    args = parser.parse_args()
+
+    root = Path(args.directory).resolve()
+
+    if not root.exists():
+        print(f"Error: '{args.directory}' does not exist", file=sys.stderr)
+        sys.exit(1)
+
+    if not root.is_dir():
+        print(f"Error: '{args.directory}' is not a directory", file=sys.stderr)
+        sys.exit(1)
+
+    if not args.quiet:
+        print(f"Scanning {root}...", file=sys.stderr)
+
+    dir_stats = find_duplicates(root, verbose=args.verbose)
+
+    if not dir_stats:
+        if not args.quiet:
+            print("No duplicate files found.", file=sys.stderr)
+        sys.exit(0)
+
+    # Sort by redundancy score (descending), then by path for stable ordering
+    sorted_dirs = sorted(
+        dir_stats.items(),
+        key=lambda x: (-calculate_redundancy_score(x[1][0], x[1][1]), str(x[0]))
+    )
+
+    # Print results
+    for dir_path, (duplicates, total) in sorted_dirs:
+        score = calculate_redundancy_score(duplicates, total)
+        # Format: "75.00% (3/4) /path/to/directory"
+        print(f"{score:6.2%} ({duplicates}/{total}) {dir_path}")
+
+    if not args.quiet:
+        print(f"\nFound {len(dir_stats)} directories with duplicate files.", file=sys.stderr)
+
+
+if __name__ == '__main__':
+    main()
