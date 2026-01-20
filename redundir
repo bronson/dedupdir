@@ -70,9 +70,6 @@ def find_duplicates(root_path: Path, algorithm: str = 'blake2b', jobs: int = 4, 
 
     file_count = 0
 
-    if not quiet:
-        print(f"  Collecting files...", file=sys.stderr)
-
     for dirpath, dirnames, filenames in os.walk(root_path):
         dir_path = Path(dirpath)
 
@@ -93,7 +90,7 @@ def find_duplicates(root_path: Path, algorithm: str = 'blake2b', jobs: int = 4, 
                     continue
 
     if not quiet:
-        print(f"  Found {file_count} files", file=sys.stderr)
+        print(f"  Found {file_count} total files", file=sys.stderr)
 
     # Only hash files that have at least one other file with the same size
     files_to_hash = []
@@ -102,7 +99,7 @@ def find_duplicates(root_path: Path, algorithm: str = 'blake2b', jobs: int = 4, 
             files_to_hash.extend(paths)
 
     if not quiet:
-        print(f"  Need to hash {len(files_to_hash)} files (skipped {file_count - len(files_to_hash)} unique sizes)", file=sys.stderr)
+        print(f"  Hashing {len(files_to_hash)} files, skipping {file_count - len(files_to_hash)} files with unique sizes", file=sys.stderr)
 
     # Hash files in parallel
     file_hashes: dict[str, list[Path]] = defaultdict(list)
@@ -129,13 +126,12 @@ def find_duplicates(root_path: Path, algorithm: str = 'blake2b', jobs: int = 4, 
                     print(f"  Hashed {i}/{len(files_to_hash)} files...", file=sys.stderr)
 
     if not quiet:
-        print(f"  Hashed {len(files_to_hash)} total files", file=sys.stderr)
+        print(f"  Hashed {len(files_to_hash)} files", file=sys.stderr)
 
     # Find hashes that appear more than once (duplicates)
     duplicate_hashes = {h for h, paths in file_hashes.items() if len(paths) > 1}
 
-    if not quiet:
-        print(f"  Found {len(duplicate_hashes)} unique duplicate content hashes", file=sys.stderr)
+
 
     # Build a map of file path to hash for duplicate files
     file_to_hash = {}
@@ -146,14 +142,18 @@ def find_duplicates(root_path: Path, algorithm: str = 'blake2b', jobs: int = 4, 
 
     # Calculate redundancy for each directory
     dir_stats: dict[Path, tuple[int, int]] = {}
+    total_files = 0
+    total_duplicates = 0
 
     for dir_path, file_paths in dir_all_files.items():
         total = len(file_paths)
         duplicates = sum(1 for fpath in file_paths if fpath in file_to_hash)
+        total_files += total
+        total_duplicates += duplicates
         if duplicates > 0:
             dir_stats[dir_path] = (duplicates, total)
 
-    return dir_stats
+    return dir_stats, total_duplicates, total_files
 
 
 def calculate_redundancy_score(duplicates: int, total: int) -> float:
@@ -207,11 +207,18 @@ def main():
     if not args.quiet:
         print(f"Scanning {root}...", file=sys.stderr)
 
-    dir_stats = find_duplicates(root, algorithm=args.algorithm, jobs=args.jobs, quiet=args.quiet)
+    dir_stats, total_duplicates, total_files = find_duplicates(root, algorithm=args.algorithm, jobs=args.jobs, quiet=args.quiet)
+
+    # Print summary before results
+    if not args.quiet:
+        if not dir_stats:
+            print("No duplicate files found.", file=sys.stderr)
+        else:
+            overall_redundancy = calculate_redundancy_score(total_duplicates, total_files)
+            print(f"  Found {total_duplicates} duplicate files in {len(dir_stats)} directories (overall redundancy: {overall_redundancy:.2%})", file=sys.stderr)
+            print("", file=sys.stderr)
 
     if not dir_stats:
-        if not args.quiet:
-            print("No duplicate files found.", file=sys.stderr)
         sys.exit(0)
 
     # Sort by redundancy score (descending), then by path for stable ordering
@@ -244,9 +251,6 @@ def main():
         # Format percentage with proper alignment (right-align to 7 chars including %)
         percent_str = f"{score:7.2%}"
         print(f"{percent_str}  {count_str:>{max_count_width}}  {display_path}")
-
-    if not args.quiet:
-        print(f"\nFound {len(dir_stats)} directories with duplicate files.", file=sys.stderr)
 
 
 if __name__ == '__main__':
