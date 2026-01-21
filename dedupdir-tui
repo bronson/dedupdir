@@ -87,13 +87,13 @@ class DedupdirTUI:
         self.current_filtered_dirs = []  # Filtered directory list when a file is selected
         self.current_bottom_dir = None  # The directory whose files are shown in bottom pane (doesn't change when navigating within bottom pane)
 
-        # Trash/deletion system (trash dirs are per-root, not in cwd)
-        self.deletion_stack = []  # Stack for undo: [(original_path, trash_path, is_dir), ...]
+        # Trash system (trash dirs are per-root, not in cwd)
+        self.trash_stack = []  # Stack for undo: [(original_path, trash_path, is_dir), ...]
         self.viewing_trash = False  # Whether we're in trash viewing mode
         self.trash_selected_idx = 0
         self.trash_offset = 0
-        self.confirm_delete_item = None  # Item pending confirmation
-        self.confirm_delete_type = None  # 'file' or 'directory'
+        self.confirm_trash_item = None  # Item pending confirmation
+        self.confirm_trash_type = None  # 'file' or 'directory'
         self.show_no_duplicates_message = False  # Show message when no duplicates found
 
         # Data will be populated by scan()
@@ -306,7 +306,7 @@ class DedupdirTUI:
                 return False
         return True
 
-    def delete_item(self, item_path, item_type):
+    def trash_item(self, item_path, item_type):
         """Move item to trash and update data structures."""
         item_path = Path(item_path)
 
@@ -340,11 +340,11 @@ class DedupdirTUI:
             return False
 
         # Add to undo stack (store simple tuple)
-        self.deletion_stack.append((str(item_path), str(trash_path), item_type == 'directory'))
+        self.trash_stack.append((str(item_path), str(trash_path), item_type == 'directory'))
 
         # Update data structures
         if item_type == 'file':
-            # If we're deleting the selected file, we need to update the selection
+            # If we're trashing the selected file, we need to update the selection
             # to point to another copy (if any exist) or clear it
             if self.selected_file == item_path:
                 # Get the hash before we remove the file
@@ -388,7 +388,7 @@ class DedupdirTUI:
         file_hash = self.file_to_hash[file_path]
         parent_dir = file_path.parent
 
-        # Get all directories that will be affected by this deletion
+        # Get all directories that will be affected by this trashing
         # (all directories that have files with this hash)
         affected_dirs = set()
         if file_hash in self.hash_to_dirs:
@@ -411,7 +411,7 @@ class DedupdirTUI:
         del self.file_to_hash[file_path]
 
         # Recalculate stats for ALL affected directories
-        # (not just the one we deleted from, but all that had this hash)
+        # (not just the one we trashed from, but all that had this hash)
         for dir_path in affected_dirs:
             if dir_path in self.dir_stats or dir_path in self.dir_all_files:
                 # Recalculate duplicates for this directory
@@ -444,12 +444,12 @@ class DedupdirTUI:
         if dir_path in self.dir_stats:
             del self.dir_stats[dir_path]
 
-    def undo_last_deletion(self):
-        """Undo the most recent deletion."""
-        if not self.deletion_stack:
+    def undo_last_trash(self):
+        """Undo the most recent trash operation."""
+        if not self.trash_stack:
             return False
 
-        original_path_str, trash_path_str, is_dir = self.deletion_stack.pop()
+        original_path_str, trash_path_str, is_dir = self.trash_stack.pop()
         trash_path = Path(trash_path_str)
         original_path = Path(original_path_str)
 
@@ -459,7 +459,7 @@ class DedupdirTUI:
             shutil.move(str(trash_path), str(original_path))
         except Exception as e:
             # Put it back on stack if restore failed
-            self.deletion_stack.append((original_path_str, trash_path_str, is_dir))
+            self.trash_stack.append((original_path_str, trash_path_str, is_dir))
             return False
 
         # Clean up empty directories in trash
@@ -487,8 +487,8 @@ class DedupdirTUI:
         # Clean up empty directories in trash
         self.cleanup_empty_trash_dirs(trash_path.parent)
 
-        # Remove from deletion stack if present
-        self.deletion_stack = [d for d in self.deletion_stack if d[1] != trash_record['trash_path']]
+        # Remove from trash stack if present
+        self.trash_stack = [d for d in self.trash_stack if d[1] != trash_record['trash_path']]
 
         # Rescan to update data structures
         self.scan(quiet=True)
@@ -503,7 +503,7 @@ class DedupdirTUI:
         # Walk up from start_dir, removing empty directories
         current = start_dir
         while current.exists() and current.is_dir():
-            # Check if this is a trash directory (don't delete the trash root itself)
+            # Check if this is a trash directory
             is_trash_root = any(current == self.get_trash_dir_for_root(root) for root in self.root_paths)
             if is_trash_root:
                 break
@@ -1302,7 +1302,7 @@ Actions:
 
         if not self.sorted_dirs:
             # No duplicates found - show trash viewer instead of exiting
-            # This allows user to restore files if they deleted too much
+            # This allows user to restore files if they trashed too much
             self.viewing_trash = True
             self.trash_selected_idx = 0
             self.trash_offset = 0
@@ -1337,7 +1337,7 @@ Actions:
 
                 # Draw hint bar
                 self.draw_hint_bar(stdscr, 'trash')
-            elif self.confirm_delete_item is not None:
+            elif self.confirm_trash_item is not None:
                 # Confirmation dialog mode - draw normal panes + dialog
                 top_height = max(5, usable_height * 2 // 5)
                 bottom_height = usable_height - top_height
@@ -1346,7 +1346,7 @@ Actions:
                 self.draw_top_pane(top_win, top_height, width)
                 self.draw_bottom_pane(bottom_win, bottom_height, width)
                 # Draw confirmation dialog on top
-                rel_path = self.get_relative_path(self.confirm_delete_item)
+                rel_path = self.get_relative_path(self.confirm_trash_item)
                 message = f"There is only one copy of\n\n{rel_path}\n\nIf you trash it, you will lose data."
                 self.draw_confirmation_dialog(stdscr, message)
 
@@ -1374,20 +1374,20 @@ Actions:
                 continue
 
             # Handle confirmation dialog first (takes priority)
-            if self.confirm_delete_item is not None:
+            if self.confirm_trash_item is not None:
                 if key in (ord('q'), ord('Q')):  # Q key - quit immediately
                     break
                 if key in (ord('y'), ord('Y')):
                     # Confirmed - proceed with trashing
-                    item_path, item_type = self.confirm_delete_item, self.confirm_delete_type
-                    self.delete_item(item_path, item_type)
-                    self.confirm_delete_item = None
-                    self.confirm_delete_type = None
+                    item_path, item_type = self.confirm_trash_item, self.confirm_trash_type
+                    self.trash_item(item_path, item_type)
+                    self.confirm_trash_item = None
+                    self.confirm_trash_type = None
                     continue
                 elif key in (ord('n'), ord('N'), 27):  # n, N, or ESC
                     # Cancelled
-                    self.confirm_delete_item = None
-                    self.confirm_delete_type = None
+                    self.confirm_trash_item = None
+                    self.confirm_trash_type = None
                     continue
                 elif key == ord('?'):
                     # Show help
@@ -1679,7 +1679,7 @@ Actions:
                 continue
             # U key - undo last trash operation
             elif key in (ord('u'), ord('U')):
-                self.undo_last_deletion()
+                self.undo_last_trash()
                 continue
             # ? key - show help
             elif key == ord('?'):
@@ -1697,44 +1697,44 @@ Actions:
                 continue
             # T key - trash file or directory
             elif key == ord('t'):
-                item_to_delete = None
-                delete_type = None
+                item_to_trash = None
+                trash_type = None
 
                 if self.active_pane == 'top':
                     # Trash selected directory
                     dirs_to_use = self.current_filtered_dirs if self.current_filtered_dirs else self.sorted_dirs
                     if self.selected_idx < len(dirs_to_use):
                         dir_path = dirs_to_use[self.selected_idx][0]
-                        item_to_delete = dir_path
-                        delete_type = 'directory'
+                        item_to_trash = dir_path
+                        trash_type = 'directory'
                 elif self.active_pane == 'bottom':
                     # Trash selected file
                     if hasattr(self, 'bottom_line_to_file') and self.bottom_selected_idx in self.bottom_line_to_file:
                         file_path = self.bottom_line_to_file[self.bottom_selected_idx]
-                        item_to_delete = file_path
-                        delete_type = 'file'
+                        item_to_trash = file_path
+                        trash_type = 'file'
 
-                if item_to_delete:
-                    # Check if fully redundant
+                if item_to_trash:
+                    # Check if we need confirmation
                     needs_confirmation = False
                     num_roots = len(self.root_paths)
 
-                    if delete_type == 'file':
-                        count = self.get_file_redundancy_count(item_to_delete)
+                    if trash_type == 'file':
+                        count = self.get_file_redundancy_count(item_to_trash)
                         if count < num_roots:
                             needs_confirmation = True
                     else:  # directory
-                        if not self.is_dir_fully_redundant(item_to_delete):
+                        if not self.is_dir_fully_redundant(item_to_trash):
                             needs_confirmation = True
 
                     if needs_confirmation:
                         # Set confirmation state - will be drawn at top of loop
-                        self.confirm_delete_item = item_to_delete
-                        self.confirm_delete_type = delete_type
+                        self.confirm_trash_item = item_to_trash
+                        self.confirm_trash_type = trash_type
                     else:
                         # Trash immediately
-                        was_in_bottom_pane = (self.active_pane == 'bottom' and delete_type == 'file')
-                        self.delete_item(item_to_delete, delete_type)
+                        was_in_bottom_pane = (self.active_pane == 'bottom' and trash_type == 'file')
+                        self.trash_item(item_to_trash, trash_type)
 
                         # After trashing, clear navigation stack so left arrow works correctly
                         self.navigation_stack = []
@@ -1748,57 +1748,6 @@ Actions:
             # V key - view file
             elif key in (ord('v'), ord('V')):
 
-                continue
-            # t key - trash item
-            elif key == ord('t'):
-                item_to_delete = None
-                delete_type = None
-
-                if self.active_pane == 'top':
-                    # Trash selected directory
-                    dirs_to_use = self.current_filtered_dirs if self.current_filtered_dirs else self.sorted_dirs
-                    if self.selected_idx < len(dirs_to_use):
-                        dir_path = dirs_to_use[self.selected_idx][0]
-                        item_to_delete = dir_path
-                        delete_type = 'directory'
-                elif self.active_pane == 'bottom':
-                    # Trash selected file
-                    if hasattr(self, 'bottom_line_to_file') and self.bottom_selected_idx in self.bottom_line_to_file:
-                        file_path = self.bottom_line_to_file[self.bottom_selected_idx]
-                        item_to_delete = file_path
-                        delete_type = 'file'
-
-                if item_to_delete:
-                    # Check if fully redundant
-                    needs_confirmation = False
-                    num_roots = len(self.root_paths)
-
-                    if delete_type == 'file':
-                        count = self.get_file_redundancy_count(item_to_delete)
-                        if count < num_roots:
-                            needs_confirmation = True
-                    else:  # directory
-                        if not self.is_dir_fully_redundant(item_to_delete):
-                            needs_confirmation = True
-
-                    if needs_confirmation:
-                        # Set confirmation state - will be drawn at top of loop
-                        self.confirm_delete_item = item_to_delete
-                        self.confirm_delete_type = delete_type
-                    else:
-                        # Delete immediately
-                        was_in_bottom_pane = (self.active_pane == 'bottom' and delete_type == 'file')
-                        self.delete_item(item_to_delete, delete_type)
-
-                        # After deletion, clear navigation stack so left arrow works correctly
-                        self.navigation_stack = []
-
-                        # If we deleted a file from bottom pane, the filter needs updating
-                        # The bottom_line_to_file mapping is stale, so just clear the filter
-                        # It will be rebuilt on next draw with the new file list
-                        if was_in_bottom_pane:
-                            self.selected_file = None
-                continue
                 # Only allow viewing files from bottom pane
                 if self.active_pane == 'bottom':
                     if hasattr(self, 'bottom_line_to_file') and self.bottom_selected_idx in self.bottom_line_to_file:
@@ -1861,56 +1810,6 @@ Actions:
                                     viewer_height = int(height * 0.85)
                                     visible_height = viewer_height - 2
                                     scroll_offset = max(0, total_lines - visible_height)
-                continue
-            # t key - trash item
-            elif key == ord('t'):
-                item_to_delete = None
-                delete_type = None
-
-                if self.active_pane == 'top':
-                    # Trash selected directory
-                    dirs_to_use = self.current_filtered_dirs if self.current_filtered_dirs else self.sorted_dirs
-                    if self.selected_idx < len(dirs_to_use):
-                        dir_path = dirs_to_use[self.selected_idx][0]
-                        item_to_delete = dir_path
-                        delete_type = 'directory'
-                elif self.active_pane == 'bottom':
-                    # Trash selected file
-                    if hasattr(self, 'bottom_line_to_file') and self.bottom_selected_idx in self.bottom_line_to_file:
-                        file_path = self.bottom_line_to_file[self.bottom_selected_idx]
-                        item_to_delete = file_path
-                        delete_type = 'file'
-
-                if item_to_delete:
-                    # Check if fully redundant
-                    needs_confirmation = False
-                    num_roots = len(self.root_paths)
-
-                    if delete_type == 'file':
-                        count = self.get_file_redundancy_count(item_to_delete)
-                        if count < num_roots:
-                            needs_confirmation = True
-                    else:  # directory
-                        if not self.is_dir_fully_redundant(item_to_delete):
-                            needs_confirmation = True
-
-                    if needs_confirmation:
-                        # Set confirmation state - will be drawn at top of loop
-                        self.confirm_delete_item = item_to_delete
-                        self.confirm_delete_type = delete_type
-                    else:
-                        # Delete immediately
-                        was_in_bottom_pane = (self.active_pane == 'bottom' and delete_type == 'file')
-                        self.delete_item(item_to_delete, delete_type)
-
-                        # After deletion, clear navigation stack so left arrow works correctly
-                        self.navigation_stack = []
-
-                        # If we deleted a file from bottom pane, the filter needs updating
-                        # The bottom_line_to_file mapping is stale, so just clear the filter
-                        # It will be rebuilt on next draw with the new file list
-                        if was_in_bottom_pane:
-                            self.selected_file = None
                 continue
             elif key in (curses.KEY_UP, ord('k')):
                 self.show_quit_message = False
