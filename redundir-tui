@@ -296,7 +296,11 @@ class RedundirTUI:
 
             y = i + 1
             if idx == self.selected_idx:
-                attr = curses.A_REVERSE
+                if self.active_pane == 'top':
+                    attr = curses.A_REVERSE
+                else:
+                    # Inactive pane - show selection as bright/bold and underlined
+                    attr = curses.A_BOLD | curses.A_UNDERLINE
             else:
                 attr = curses.A_NORMAL
             win.addstr(y, 1, line.ljust(width - 2), attr)
@@ -403,9 +407,13 @@ class RedundirTUI:
             if len(line) > max_len:
                 line = line[:max_len-3] + "..."
 
-            # Highlight selected line if bottom pane is active
-            if self.active_pane == 'bottom' and idx == self.bottom_selected_idx:
-                attr = curses.A_REVERSE
+            # Highlight selected line
+            if idx == self.bottom_selected_idx:
+                if self.active_pane == 'bottom':
+                    attr = curses.A_REVERSE
+                else:
+                    # Inactive pane - show selection as bright/bold and underlined
+                    attr = curses.A_BOLD | curses.A_UNDERLINE
 
             try:
                 win.addstr(y, 1, line, attr)
