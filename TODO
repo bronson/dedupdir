@@ -1,6 +1,5 @@
 - show a running count in the top right corner: % redundant, total files, files in trash, files remaining to ttrash
-- display keystroke hints on the bottom line of the screen
-- it feels weird trying to drive all files to 0%. Maybe this should be about 'necessary' instead of 'redundant'. A 66% redundant file is 33% necessary. That way we trash files unless they're 100% necessary.  (instead of now, trashing files when they're more than 0% redundant)
+- this upper-pane and lower-pane UI (left over from using fzf) is getting in the way. Rethink the UI.
 - there should be a way to cache the hashes to significantly speed up the app
 
 - 'o' to xdg-open a file?

@@ -952,7 +952,7 @@ class DedupdirTUI:
 
         return metadata_lines, content_lines, file_type
 
-    def draw_file_viewer(self, stdscr, file_path, scroll_offset):
+    def draw_file_viewer(self, stdscr, file_path, metadata_lines, content_lines, scroll_offset):
         """Draw file viewer as centered overlay window (75% width, 85% height)."""
         term_height, term_width = stdscr.getmaxyx()
 
@@ -970,9 +970,6 @@ class DedupdirTUI:
         # Title
         title = f" Viewing: {file_path.name} (q/ESC to close, arrows/j/k to scroll) "
         viewer_win.addstr(0, 2, title[:width-4], curses.A_BOLD | curses.A_REVERSE)
-
-        # Get content
-        metadata_lines, content_lines, file_type = self.get_file_content_for_viewing(file_path)
 
         # Draw metadata section (fixed, not scrollable, in dim color)
         metadata_height = len(metadata_lines)
@@ -1451,6 +1448,9 @@ Actions:
                         item_dict = items[self.trash_selected_idx]
                         trash_path = Path(item_dict['trash_path'])
                         if trash_path.is_file():
+                            # Get file content once before entering viewer loop
+                            metadata_lines, content_lines, file_type = self.get_file_content_for_viewing(trash_path)
+
                             # Enter file viewing mode
                             scroll_offset = 0
                             while True:
@@ -1472,7 +1472,7 @@ Actions:
                                 self.draw_trash_pane(trash_win, trash_height, trash_width)
 
                                 # Draw file viewer overlay on top
-                                scroll_offset, total_lines = self.draw_file_viewer(stdscr, trash_path, scroll_offset)
+                                scroll_offset, total_lines = self.draw_file_viewer(stdscr, trash_path, metadata_lines, content_lines, scroll_offset)
 
                                 # Draw hint bar
                                 self.draw_hint_bar(stdscr, 'viewer')
@@ -1667,6 +1667,9 @@ Actions:
                     if hasattr(self, 'bottom_line_to_file') and self.bottom_selected_idx in self.bottom_line_to_file:
                         file_path = self.bottom_line_to_file[self.bottom_selected_idx]
                         if file_path.is_file():
+                            # Get file content once before entering viewer loop
+                            metadata_lines, content_lines, file_type = self.get_file_content_for_viewing(file_path)
+
                             # Enter file viewing mode
                             scroll_offset = 0
                             while True:
@@ -1682,7 +1685,7 @@ Actions:
                                 self.draw_bottom_pane(bottom_win, bottom_height, width)
 
                                 # Draw file viewer overlay on top
-                                scroll_offset, total_lines = self.draw_file_viewer(stdscr, file_path, scroll_offset)
+                                scroll_offset, total_lines = self.draw_file_viewer(stdscr, file_path, metadata_lines, content_lines, scroll_offset)
 
                                 # Draw hint bar
                                 self.draw_hint_bar(stdscr, 'viewer')
