@@ -957,16 +957,23 @@ class DedupdirTUI:
         return lines, file_type
 
     def draw_file_viewer(self, stdscr, file_path, scroll_offset):
-        """Draw a full-screen file viewer with scrolling."""
-        height, width = stdscr.getmaxyx()
+        """Draw file viewer as centered overlay window (75% width, 85% height)."""
+        term_height, term_width = stdscr.getmaxyx()
 
-        # Clear screen
-        stdscr.clear()
-        stdscr.border()
+        # Create centered overlay window (75% width, 85% height)
+        height = int(term_height * 0.85)
+        width = int(term_width * 0.75)
+        y = (term_height - height) // 2
+        x = (term_width - width) // 2
+
+        # Create window for file viewer
+        viewer_win = curses.newwin(height, width, y, x)
+        viewer_win.clear()
+        viewer_win.border()
 
         # Title
         title = f" Viewing: {file_path.name} (q/ESC to close, arrows/j/k to scroll) "
-        stdscr.addstr(0, 2, title[:width-4], curses.A_BOLD | curses.A_REVERSE)
+        viewer_win.addstr(0, 2, title[:width-4], curses.A_BOLD | curses.A_REVERSE)
 
         # Get content
         lines, file_type = self.get_file_content_for_viewing(file_path)
@@ -984,7 +991,7 @@ class DedupdirTUI:
                 # Truncate line to fit width
                 display_line = line[:width-3]
                 try:
-                    stdscr.addstr(1 + i, 1, display_line)
+                    viewer_win.addstr(1 + i, 1, display_line)
                 except curses.error:
                     pass  # Ignore errors from writing to last position
 
@@ -993,11 +1000,11 @@ class DedupdirTUI:
             percent = (scroll_offset / max_offset * 100) if max_offset > 0 else 0
             status = f" {percent:.0f}% ({scroll_offset + 1}-{min(scroll_offset + visible_height, len(lines))} of {len(lines)}) "
             try:
-                stdscr.addstr(height - 1, width - len(status) - 2, status, curses.A_REVERSE)
+                viewer_win.addstr(height - 1, width - len(status) - 2, status, curses.A_REVERSE)
             except curses.error:
                 pass
 
-        stdscr.refresh()
+        viewer_win.refresh()
         return scroll_offset, len(lines)
 
     def draw_confirmation_dialog(self, stdscr, message):
@@ -1078,9 +1085,21 @@ class DedupdirTUI:
 
             # Draw based on current mode
             if self.viewing_trash:
-                # Trash viewer mode - full screen
-                trash_win = curses.newwin(height, width, 0, 0)
-                self.draw_trash_pane(trash_win, height, width)
+                # Trash viewer mode - draw main screen first, then overlay
+                top_height = max(5, height * 2 // 5)
+                bottom_height = height - top_height
+                top_win = curses.newwin(top_height, width, 0, 0)
+                bottom_win = curses.newwin(bottom_height, width, top_height, 0)
+                self.draw_top_pane(top_win, top_height, width)
+                self.draw_bottom_pane(bottom_win, bottom_height, width)
+
+                # Draw trash viewer as centered overlay (85% width, 92% height)
+                trash_height = int(height * 0.92)
+                trash_width = int(width * 0.85)
+                trash_y = (height - trash_height) // 2
+                trash_x = (width - trash_width) // 2
+                trash_win = curses.newwin(trash_height, trash_width, trash_y, trash_x)
+                self.draw_trash_pane(trash_win, trash_height, trash_width)
             elif self.confirm_delete_item is not None:
                 # Confirmation dialog mode - draw normal panes + dialog
                 top_height = max(5, height * 2 // 5)
@@ -1188,6 +1207,24 @@ class DedupdirTUI:
                             # Enter file viewing mode
                             scroll_offset = 0
                             while True:
+                                # Get current terminal dimensions
+                                height, width = stdscr.getmaxyx()
+
+                                # Redraw trash viewer first (as background)
+                                top_height = max(5, height * 2 // 5)
+                                bottom_height = height - top_height
+                                top_win = curses.newwin(top_height, width, 0, 0)
+                                bottom_win = curses.newwin(bottom_height, width, top_height, 0)
+                                self.draw_top_pane(top_win, top_height, width)
+                                self.draw_bottom_pane(bottom_win, bottom_height, width)
+                                trash_height = int(height * 0.92)
+                                trash_width = int(width * 0.85)
+                                trash_y = (height - trash_height) // 2
+                                trash_x = (width - trash_width) // 2
+                                trash_win = curses.newwin(trash_height, trash_width, trash_y, trash_x)
+                                self.draw_trash_pane(trash_win, trash_height, trash_width)
+
+                                # Draw file viewer overlay on top
                                 scroll_offset, total_lines = self.draw_file_viewer(stdscr, trash_path, scroll_offset)
 
                                 # Handle viewer input
@@ -1202,25 +1239,25 @@ class DedupdirTUI:
                                 elif view_key in (curses.KEY_UP, ord('k')):
                                     scroll_offset = max(0, scroll_offset - 1)
                                 elif view_key in (curses.KEY_DOWN, ord('j')):
-                                    visible_height = stdscr.getmaxyx()[0] - 2
+                                    viewer_height = int(height * 0.85)
+                                    visible_height = viewer_height - 2
                                     max_offset = max(0, total_lines - visible_height)
                                     scroll_offset = min(max_offset, scroll_offset + 1)
                                 elif view_key in (curses.KEY_PPAGE, 2):  # Page Up or Ctrl-B
-                                    visible_height = stdscr.getmaxyx()[0] - 2
+                                    viewer_height = int(height * 0.85)
+                                    visible_height = viewer_height - 2
                                     scroll_offset = max(0, scroll_offset - visible_height)
                                 elif view_key in (curses.KEY_NPAGE, 6):  # Page Down or Ctrl-F
-                                    visible_height = stdscr.getmaxyx()[0] - 2
+                                    viewer_height = int(height * 0.85)
+                                    visible_height = viewer_height - 2
                                     max_offset = max(0, total_lines - visible_height)
                                     scroll_offset = min(max_offset, scroll_offset + visible_height)
                                 elif view_key in (curses.KEY_HOME, ord('<')):
                                     scroll_offset = 0
                                 elif view_key in (curses.KEY_END, ord('>')):
-                                    visible_height = stdscr.getmaxyx()[0] - 2
+                                    viewer_height = int(height * 0.85)
+                                    visible_height = viewer_height - 2
                                     scroll_offset = max(0, total_lines - visible_height)
-
-                            # Redraw trash viewer after exiting file viewer
-                            stdscr.clear()
-                            stdscr.refresh()
                 # Continue to redraw at top of loop
                 continue
 
@@ -1375,6 +1412,18 @@ class DedupdirTUI:
                             # Enter file viewing mode
                             scroll_offset = 0
                             while True:
+                                # Get current terminal dimensions
+                                height, width = stdscr.getmaxyx()
+
+                                # Redraw main screen first (as background)
+                                top_height = max(5, height * 2 // 5)
+                                bottom_height = height - top_height
+                                top_win = curses.newwin(top_height, width, 0, 0)
+                                bottom_win = curses.newwin(bottom_height, width, top_height, 0)
+                                self.draw_top_pane(top_win, top_height, width)
+                                self.draw_bottom_pane(bottom_win, bottom_height, width)
+
+                                # Draw file viewer overlay on top
                                 scroll_offset, total_lines = self.draw_file_viewer(stdscr, file_path, scroll_offset)
 
                                 # Handle viewer input
@@ -1389,25 +1438,25 @@ class DedupdirTUI:
                                 elif view_key in (curses.KEY_UP, ord('k')):
                                     scroll_offset = max(0, scroll_offset - 1)
                                 elif view_key in (curses.KEY_DOWN, ord('j')):
-                                    visible_height = stdscr.getmaxyx()[0] - 2
+                                    viewer_height = int(height * 0.85)
+                                    visible_height = viewer_height - 2
                                     max_offset = max(0, total_lines - visible_height)
                                     scroll_offset = min(max_offset, scroll_offset + 1)
                                 elif view_key in (curses.KEY_PPAGE, 2):  # Page Up or Ctrl-B
-                                    visible_height = stdscr.getmaxyx()[0] - 2
+                                    viewer_height = int(height * 0.85)
+                                    visible_height = viewer_height - 2
                                     scroll_offset = max(0, scroll_offset - visible_height)
                                 elif view_key in (curses.KEY_NPAGE, 6):  # Page Down or Ctrl-F
-                                    visible_height = stdscr.getmaxyx()[0] - 2
+                                    viewer_height = int(height * 0.85)
+                                    visible_height = viewer_height - 2
                                     max_offset = max(0, total_lines - visible_height)
                                     scroll_offset = min(max_offset, scroll_offset + visible_height)
                                 elif view_key in (curses.KEY_HOME, ord('<')):
                                     scroll_offset = 0
                                 elif view_key in (curses.KEY_END, ord('>')):
-                                    visible_height = stdscr.getmaxyx()[0] - 2
+                                    viewer_height = int(height * 0.85)
+                                    visible_height = viewer_height - 2
                                     scroll_offset = max(0, total_lines - visible_height)
-
-                            # Redraw main interface after exiting viewer
-                            stdscr.clear()
-                            stdscr.refresh()
                 continue
             # D key - delete item
             elif key == ord('d'):
