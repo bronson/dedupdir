@@ -109,9 +109,10 @@ Supports scanning multiple directories just like the CLI tool.
 - `PgUp`/`PgDn` or `Ctrl-B`/`Ctrl-F` - Page up/down
 - `Home`/`End` or `<`/`>` - Jump to first/last item
 - `v` - View selected file (text files, images with EXIF data, or hex dump for binaries)
+- `o` - Open selected file with system default application (images, audio, video, documents, etc.)
 - `d` - Delete selected file or directory (moves to `~dedupdir-trash/` with confirmation for non-redundant items)
 - `u` - Undo last deletion (progressively restores deleted items)
-- `t` - Toggle trash viewer (`r` to restore items, `v` to view, `t` or `Esc` to exit)
+- `t` - Toggle trash viewer (`r` to restore, `v` to view, `o` to open, `t` or `Esc` to exit)
 - `?` - Show context-sensitive help
 - `q` - Quit
 

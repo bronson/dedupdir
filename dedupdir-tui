@@ -1033,6 +1033,7 @@ Navigation:
 
 Actions:
   v                 View selected file
+  o                 Open selected file with desktop viewer
   d                 Delete selected file or directory
   u                 Undo last deletion
   t                 Toggle trash viewer
@@ -1054,6 +1055,7 @@ Navigation:
 
 Actions:
   v                 View selected file
+  o                 Open selected file with desktop viewer
   r                 Restore selected item
   t or Esc          Return to main view
   q                 Quit
@@ -1183,12 +1185,27 @@ Actions:
                 visible_height = help_height - 2
                 scroll_offset = max(0, total_lines - visible_height)
 
+    def open_file_with_system_app(self, file_path):
+        """Open file with system's default application (cross-platform)."""
+        try:
+            import subprocess
+            import platform
+            system = platform.system()
+            if system == 'Darwin':  # macOS
+                subprocess.Popen(['open', str(file_path)])
+            elif system == 'Windows':
+                subprocess.Popen(['start', str(file_path)], shell=True)
+            else:  # Linux and others
+                subprocess.Popen(['xdg-open', str(file_path)])
+        except Exception:
+            pass  # Silently fail if can't open
+
     def get_hint_text(self, mode):
         """Get hint bar text for the given mode."""
         if mode == 'main':
-            return "↑↓:Navigate  v:View  d:Delete  t:Trash"
+            return "↑↓:Navigate  v:View  o:Open  d:Delete  t:Trash"
         elif mode == 'trash':
-            return "↑↓:Navigate  v:View  r:Restore  t:Back"
+            return "↑↓:Navigate  v:View  o:Open  r:Restore  t:Back"
         elif mode == 'viewer':
             return "↑↓:Scroll  PgUp/PgDn:Page  q:Close"
         elif mode == 'confirm':
@@ -1396,6 +1413,14 @@ Actions:
                 elif key == ord('?'):
                     # Show help
                     self.show_help_viewer(stdscr, 'trash')
+                    continue
+                elif key in (ord('o'), ord('O')):  # Open file with system default application
+                    items = self.get_trash_items()
+                    if items and self.trash_selected_idx < len(items):
+                        item_dict = items[self.trash_selected_idx]
+                        trash_path = Path(item_dict['trash_path'])
+                        if trash_path.is_file():
+                            self.open_file_with_system_app(trash_path)
                     continue
                 elif key in (curses.KEY_UP, ord('k')):
                     items = self.get_trash_items()
@@ -1659,6 +1684,15 @@ Actions:
             elif key == ord('?'):
                 # Show help
                 self.show_help_viewer(stdscr, 'main')
+                continue
+            # O key - open file with system default application
+            elif key in (ord('o'), ord('O')):
+                # Only allow opening files from bottom pane
+                if self.active_pane == 'bottom':
+                    if hasattr(self, 'bottom_line_to_file') and self.bottom_selected_idx in self.bottom_line_to_file:
+                        file_path = self.bottom_line_to_file[self.bottom_selected_idx]
+                        if file_path.is_file():
+                            self.open_file_with_system_app(file_path)
                 continue
             # V key - view file
             elif key in (ord('v'), ord('V')):

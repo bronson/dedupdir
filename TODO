@@ -1,6 +1,3 @@
 - show a running count in the top right corner: % redundant, total files, files in trash, files remaining to ttrash
 - this upper-pane and lower-pane UI (left over from using fzf) is getting in the way. Rethink the UI.
 - there should be a way to cache the hashes to significantly speed up the app
-
-- 'o' to xdg-open a file?
-- 'v' to view the file as if it's text (in a pager, is it possible to make binary files less abuvsive)?
