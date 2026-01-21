@@ -538,7 +538,8 @@ class RedundirTUI:
                             'selected_idx': self.selected_idx,
                             'selected_file': None,  # Will restore to no filter
                             'bottom_selected_idx': self.bottom_selected_idx,
-                            'current_bottom_dir': self.current_bottom_dir
+                            'current_bottom_dir': self.current_bottom_dir,
+                            'active_pane': 'bottom'
                         })
                         self.active_pane = 'top'
                         self.selected_idx = 0
@@ -552,7 +553,9 @@ class RedundirTUI:
                             'type': 'directory',
                             'selected_idx': self.selected_idx,
                             'selected_file': self.selected_file,
-                            'current_bottom_dir': self.current_bottom_dir
+                            'current_bottom_dir': self.current_bottom_dir,
+                            'bottom_selected_idx': self.bottom_selected_idx,
+                            'active_pane': 'bottom'
                         })
                         # Jump to target directory
                         self.selected_idx = target_idx
@@ -580,9 +583,10 @@ class RedundirTUI:
                             self.selected_idx = nav_state.get('selected_idx', 0)
                             self.selected_file = nav_state.get('selected_file', None)
                             self.current_bottom_dir = nav_state.get('current_bottom_dir', None)
-                            if nav_state.get('type') == 'file_filter':
-                                # Restore bottom pane selection
-                                self.active_pane = 'bottom'
+                            # Restore active pane and bottom selection if available
+                            if 'active_pane' in nav_state:
+                                self.active_pane = nav_state['active_pane']
+                            if 'bottom_selected_idx' in nav_state:
                                 self.bottom_selected_idx = nav_state.get('bottom_selected_idx', 0)
                         else:
                             # Legacy: just an index
