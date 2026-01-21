@@ -108,6 +108,7 @@ Supports scanning multiple directories just like the CLI tool.
 - `←`/`h` or `Esc` - Go back / clear filter
 - `PgUp`/`PgDn` or `Ctrl-B`/`Ctrl-F` - Page up/down
 - `Home`/`End` or `<`/`>` - Jump to first/last item
+- `v` - View selected file (text files, images with EXIF data, or hex dump for binaries)
 - `d` - Delete selected file or directory (moves to `~dedupdir-trash/` with confirmation for non-redundant items)
 - `u` - Undo last deletion (progressively restores deleted items)
 - `t` - Toggle trash viewer (`r` to restore items, `t` or `Esc` to exit)
@@ -119,7 +120,7 @@ The TUI includes a safe deletion system that moves files to `~dedupdir-trash/` (
 
 - **Smart deletion**: Fully redundant items deleted immediately; non-redundant items require confirmation
 - **Progressive undo**: Press `u` repeatedly to undo recent deletions
-- **Trash viewer**: Press `t` to toggle trash view, restore with `r`, press `t` again to return
+- **Trash viewer**: Press `t` to toggle trash view, restore with `r`, view with `v`, press `t` again to return
 - **Safe by design**: All items can be restored until you manually delete each root's `~dedupdir-trash/`
 - **Per-root trash**: Each root directory gets its own `~dedupdir-trash/` subdirectory (visible, not hidden)
 

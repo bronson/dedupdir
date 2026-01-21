@@ -759,7 +759,7 @@ class DedupdirTUI:
         win.clear()
         win.border()
 
-        title = " Trash (~dedupdir-trash) - Press 'r' to restore, 't' to toggle back, Esc to exit "
+        title = " Trash (~dedupdir-trash) - 'r' restore, 'v' view, 't' toggle back, Esc exit "
         win.addstr(0, 2, title[:width-4], curses.A_BOLD | curses.A_REVERSE)
 
         # Show "no duplicates" message if applicable
@@ -839,6 +839,166 @@ class DedupdirTUI:
                 pass
 
         win.refresh()
+
+    def get_file_type(self, file_path):
+        """Detect file type: 'text', 'image', 'binary'."""
+        try:
+            # Check by extension first
+            suffix = file_path.suffix.lower()
+
+            # Image extensions
+            image_exts = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.tif', '.webp', '.ico', '.svg'}
+            if suffix in image_exts:
+                return 'image'
+
+            # Read first chunk to detect text vs binary
+            with open(file_path, 'rb') as f:
+                chunk = f.read(8192)
+                if not chunk:
+                    return 'text'  # Empty file
+
+                # Check for null bytes (strong indicator of binary)
+                if b'\x00' in chunk:
+                    return 'binary'
+
+                # Try to decode as UTF-8
+                try:
+                    chunk.decode('utf-8')
+                    return 'text'
+                except UnicodeDecodeError:
+                    return 'binary'
+        except (IOError, OSError):
+            return 'binary'
+
+    def get_file_content_for_viewing(self, file_path):
+        """Get file content/info for viewing. Returns (lines, file_type)."""
+        file_type = self.get_file_type(file_path)
+        lines = []
+
+        try:
+            file_size = file_path.stat().st_size
+            size_mb = file_size / (1024 * 1024)
+
+            # Add header with file info
+            lines.append(f"File: {file_path.name}")
+            lines.append(f"Path: {file_path}")
+            lines.append(f"Size: {file_size:,} bytes ({size_mb:.2f} MB)")
+            lines.append("")
+
+            if file_type == 'image':
+                # Try to get EXIF data or image info
+                lines.append("=== IMAGE FILE ===")
+                lines.append("")
+
+                # Try exiftool first
+                try:
+                    import subprocess
+                    result = subprocess.run(['exiftool', str(file_path)],
+                                          capture_output=True, text=True, timeout=5)
+                    if result.returncode == 0:
+                        lines.extend(result.stdout.splitlines())
+                    else:
+                        raise Exception("exiftool failed")
+                except:
+                    # Try identify (ImageMagick)
+                    try:
+                        result = subprocess.run(['identify', '-verbose', str(file_path)],
+                                              capture_output=True, text=True, timeout=5)
+                        if result.returncode == 0:
+                            lines.extend(result.stdout.splitlines())
+                        else:
+                            raise Exception("identify failed")
+                    except:
+                        # Just show basic info
+                        lines.append("(No image tools available - install exiftool or ImageMagick for details)")
+                        lines.append("")
+                        lines.append("This is an image file. Use an image viewer to see it.")
+
+            elif file_type == 'text':
+                lines.append("=== TEXT FILE ===")
+                lines.append("")
+
+                # Limit reading to 10MB for text files
+                max_bytes = 10 * 1024 * 1024
+
+                with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                    bytes_read = 0
+                    for line_num, line in enumerate(f, 1):
+                        if bytes_read >= max_bytes:
+                            lines.append("")
+                            lines.append(f"... (file truncated at {max_bytes:,} bytes, showing first ~{line_num} lines)")
+                            break
+                        lines.append(line.rstrip('\n\r'))
+                        bytes_read += len(line.encode('utf-8'))
+
+            else:  # binary
+                lines.append("=== BINARY FILE ===")
+                lines.append("")
+
+                # Show hex dump of first 4KB
+                max_bytes = 4096
+                with open(file_path, 'rb') as f:
+                    data = f.read(max_bytes)
+
+                # Create hex dump
+                for i in range(0, len(data), 16):
+                    chunk = data[i:i+16]
+                    hex_part = ' '.join(f'{b:02x}' for b in chunk)
+                    ascii_part = ''.join(chr(b) if 32 <= b < 127 else '.' for b in chunk)
+                    lines.append(f'{i:08x}  {hex_part:<48}  {ascii_part}')
+
+                if file_size > max_bytes:
+                    lines.append("")
+                    lines.append(f"... (showing first {max_bytes:,} of {file_size:,} bytes)")
+
+        except Exception as e:
+            lines.append(f"Error reading file: {e}")
+
+        return lines, file_type
+
+    def draw_file_viewer(self, stdscr, file_path, scroll_offset):
+        """Draw a full-screen file viewer with scrolling."""
+        height, width = stdscr.getmaxyx()
+
+        # Clear screen
+        stdscr.clear()
+        stdscr.border()
+
+        # Title
+        title = f" Viewing: {file_path.name} (q/ESC to close, arrows/j/k to scroll) "
+        stdscr.addstr(0, 2, title[:width-4], curses.A_BOLD | curses.A_REVERSE)
+
+        # Get content
+        lines, file_type = self.get_file_content_for_viewing(file_path)
+
+        # Calculate visible area
+        visible_height = height - 2
+        max_offset = max(0, len(lines) - visible_height)
+        scroll_offset = max(0, min(scroll_offset, max_offset))
+
+        # Draw lines
+        for i in range(visible_height):
+            line_idx = scroll_offset + i
+            if line_idx < len(lines):
+                line = lines[line_idx]
+                # Truncate line to fit width
+                display_line = line[:width-3]
+                try:
+                    stdscr.addstr(1 + i, 1, display_line)
+                except curses.error:
+                    pass  # Ignore errors from writing to last position
+
+        # Draw scrollbar indicator if needed
+        if len(lines) > visible_height:
+            percent = (scroll_offset / max_offset * 100) if max_offset > 0 else 0
+            status = f" {percent:.0f}% ({scroll_offset + 1}-{min(scroll_offset + visible_height, len(lines))} of {len(lines)}) "
+            try:
+                stdscr.addstr(height - 1, width - len(status) - 2, status, curses.A_REVERSE)
+            except curses.error:
+                pass
+
+        stdscr.refresh()
+        return scroll_offset, len(lines)
 
     def draw_confirmation_dialog(self, stdscr, message):
         """Draw a confirmation dialog in the center of the screen."""
@@ -1019,6 +1179,48 @@ class DedupdirTUI:
                     items = self.get_trash_items()
                     self.trash_selected_idx = max(0, len(items) - 1)
                     self.trash_offset = max(0, len(items) - (height - 2))
+                elif key in (ord('v'), ord('V')):  # View file in trash
+                    items = self.get_trash_items()
+                    if items and self.trash_selected_idx < len(items):
+                        item_dict = items[self.trash_selected_idx]
+                        trash_path = Path(item_dict['trash_path'])
+                        if trash_path.is_file():
+                            # Enter file viewing mode
+                            scroll_offset = 0
+                            while True:
+                                scroll_offset, total_lines = self.draw_file_viewer(stdscr, trash_path, scroll_offset)
+
+                                # Handle viewer input
+                                view_key = stdscr.getch()
+
+                                if view_key in (ord('q'), ord('Q'), 27):  # q, Q, or ESC
+                                    break
+                                elif view_key == curses.KEY_RESIZE:
+                                    stdscr.clear()
+                                    stdscr.refresh()
+                                    continue
+                                elif view_key in (curses.KEY_UP, ord('k')):
+                                    scroll_offset = max(0, scroll_offset - 1)
+                                elif view_key in (curses.KEY_DOWN, ord('j')):
+                                    visible_height = stdscr.getmaxyx()[0] - 2
+                                    max_offset = max(0, total_lines - visible_height)
+                                    scroll_offset = min(max_offset, scroll_offset + 1)
+                                elif view_key in (curses.KEY_PPAGE, 2):  # Page Up or Ctrl-B
+                                    visible_height = stdscr.getmaxyx()[0] - 2
+                                    scroll_offset = max(0, scroll_offset - visible_height)
+                                elif view_key in (curses.KEY_NPAGE, 6):  # Page Down or Ctrl-F
+                                    visible_height = stdscr.getmaxyx()[0] - 2
+                                    max_offset = max(0, total_lines - visible_height)
+                                    scroll_offset = min(max_offset, scroll_offset + visible_height)
+                                elif view_key in (curses.KEY_HOME, ord('<')):
+                                    scroll_offset = 0
+                                elif view_key in (curses.KEY_END, ord('>')):
+                                    visible_height = stdscr.getmaxyx()[0] - 2
+                                    scroll_offset = max(0, total_lines - visible_height)
+
+                            # Redraw trash viewer after exiting file viewer
+                            stdscr.clear()
+                            stdscr.refresh()
                 # Continue to redraw at top of loop
                 continue
 
@@ -1162,6 +1364,50 @@ class DedupdirTUI:
             # U key - undo last deletion
             elif key in (ord('u'), ord('U')):
                 self.undo_last_deletion()
+                continue
+            # V key - view file
+            elif key in (ord('v'), ord('V')):
+                # Only allow viewing files from bottom pane
+                if self.active_pane == 'bottom':
+                    if hasattr(self, 'bottom_line_to_file') and self.bottom_selected_idx in self.bottom_line_to_file:
+                        file_path = self.bottom_line_to_file[self.bottom_selected_idx]
+                        if file_path.is_file():
+                            # Enter file viewing mode
+                            scroll_offset = 0
+                            while True:
+                                scroll_offset, total_lines = self.draw_file_viewer(stdscr, file_path, scroll_offset)
+
+                                # Handle viewer input
+                                view_key = stdscr.getch()
+
+                                if view_key in (ord('q'), ord('Q'), 27):  # q, Q, or ESC
+                                    break
+                                elif view_key == curses.KEY_RESIZE:
+                                    stdscr.clear()
+                                    stdscr.refresh()
+                                    continue
+                                elif view_key in (curses.KEY_UP, ord('k')):
+                                    scroll_offset = max(0, scroll_offset - 1)
+                                elif view_key in (curses.KEY_DOWN, ord('j')):
+                                    visible_height = stdscr.getmaxyx()[0] - 2
+                                    max_offset = max(0, total_lines - visible_height)
+                                    scroll_offset = min(max_offset, scroll_offset + 1)
+                                elif view_key in (curses.KEY_PPAGE, 2):  # Page Up or Ctrl-B
+                                    visible_height = stdscr.getmaxyx()[0] - 2
+                                    scroll_offset = max(0, scroll_offset - visible_height)
+                                elif view_key in (curses.KEY_NPAGE, 6):  # Page Down or Ctrl-F
+                                    visible_height = stdscr.getmaxyx()[0] - 2
+                                    max_offset = max(0, total_lines - visible_height)
+                                    scroll_offset = min(max_offset, scroll_offset + visible_height)
+                                elif view_key in (curses.KEY_HOME, ord('<')):
+                                    scroll_offset = 0
+                                elif view_key in (curses.KEY_END, ord('>')):
+                                    visible_height = stdscr.getmaxyx()[0] - 2
+                                    scroll_offset = max(0, total_lines - visible_height)
+
+                            # Redraw main interface after exiting viewer
+                            stdscr.clear()
+                            stdscr.refresh()
                 continue
             # D key - delete item
             elif key == ord('d'):
