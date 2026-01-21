@@ -845,8 +845,8 @@ class DedupdirTUI:
         height, width = stdscr.getmaxyx()
 
         # Dialog dimensions
-        dialog_height = 7
-        dialog_width = min(60, width - 4)
+        dialog_height = 9
+        dialog_width = min(70, width - 4)
         dialog_y = (height - dialog_height) // 2
         dialog_x = (width - dialog_width) // 2
 
@@ -855,21 +855,25 @@ class DedupdirTUI:
         dialog.clear()
         dialog.box()
 
-        # Draw message (word wrap if needed)
+        # Split message by newlines first, then word wrap each line
         lines = []
-        words = message.split()
-        current_line = ""
-        for word in words:
-            if len(current_line) + len(word) + 1 <= dialog_width - 4:
-                current_line += (" " if current_line else "") + word
+        for msg_line in message.split('\n'):
+            if not msg_line:
+                lines.append("")
             else:
-                lines.append(current_line)
-                current_line = word
-        if current_line:
-            lines.append(current_line)
+                words = msg_line.split()
+                current_line = ""
+                for word in words:
+                    if len(current_line) + len(word) + 1 <= dialog_width - 4:
+                        current_line += (" " if current_line else "") + word
+                    else:
+                        lines.append(current_line)
+                        current_line = word
+                if current_line:
+                    lines.append(current_line)
 
         # Draw message lines
-        for i, line in enumerate(lines[:3]):  # Max 3 lines
+        for i, line in enumerate(lines[:5]):  # Max 5 lines
             dialog.addstr(1 + i, 2, line, curses.A_BOLD)
 
         # Draw prompt
@@ -927,7 +931,7 @@ class DedupdirTUI:
                 self.draw_bottom_pane(bottom_win, bottom_height, width)
                 # Draw confirmation dialog on top
                 rel_path = self.get_relative_path(self.confirm_delete_item)
-                message = f"'{rel_path}' is not fully redundant across all roots."
+                message = f"There is only one copy of:\n\n    {rel_path}\n\nIf you delete it, you will no longer have this data."
                 self.draw_confirmation_dialog(stdscr, message)
             else:
                 # Normal mode - split screen
