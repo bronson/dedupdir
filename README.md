@@ -76,12 +76,12 @@ redundir-tui [directory] [-a ALGORITHM] [-j N]
 - Press `Tab` to switch between panes
 
 **Keys:**
-- `Tab` - Switch between top and bottom panes
-- `Enter` - From top pane, switch to bottom pane (drill down)
-- `Esc` - From bottom pane, switch to top pane (go back); from top pane, show quit prompt
-- `↑`/`↓` or `j`/`k` - Navigate items in active pane
-- `PgUp`/`PgDn` or `Ctrl-B`/`Ctrl-F` - Page up/down in active pane
-- `Home`/`End` - Jump to first/last item in active pane
+- `Tab` - Switch between panes
+- `Enter` or `→` - Drill down (explore details)
+- `Esc` or `←` - Go back
+- `↑`/`↓` or `j`/`k` - Navigate items
+- `PgUp`/`PgDn` or `Ctrl-B`/`Ctrl-F` - Page up/down
+- `Home`/`End` or `<`/`>` - Jump to first/last item
 - `q` - Quit
 
 **Example:**

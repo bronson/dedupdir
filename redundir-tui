@@ -377,8 +377,8 @@ class RedundirTUI:
                     self.active_pane = 'top'
                 continue
 
-            # Return key - switch from top to bottom pane
-            if key in (ord('\n'), ord('\r'), curses.KEY_ENTER):
+            # Return key or Right arrow - switch from top to bottom pane (drill down)
+            if key in (ord('\n'), ord('\r'), curses.KEY_ENTER, curses.KEY_RIGHT):
                 if self.active_pane == 'top':
                     # Switch to bottom pane
                     self.active_pane = 'bottom'
@@ -392,15 +392,16 @@ class RedundirTUI:
                     self.show_quit_message = False
                 continue
 
-            # Escape key - context-sensitive behavior
-            if key == 27:  # ESC
+            # Escape key or Left arrow - context-sensitive behavior
+            if key in (27, curses.KEY_LEFT):  # ESC or Left arrow
                 if self.active_pane == 'bottom':
-                    # Switch to top pane
+                    # Switch to top pane (go back)
                     self.active_pane = 'top'
                     self.show_quit_message = False
                 else:  # top pane
-                    # Show quit message
-                    self.show_quit_message = True
+                    # Left arrow does nothing in top pane, ESC shows quit message
+                    if key == 27:
+                        self.show_quit_message = True
                 continue
 
             # Q key - quit immediately
@@ -484,7 +485,7 @@ class RedundirTUI:
                         new_pos = max(0, current_pos - (bottom_height - 2))
                         self.bottom_selected_idx = self.bottom_selectable_indices[new_pos]
                         self.bottom_offset = max(0, self.bottom_selected_idx - (bottom_height - 2))
-            elif key == curses.KEY_HOME:
+            elif key in (curses.KEY_HOME, ord('<')):  # Home or <
                 self.show_quit_message = False
                 if self.active_pane == 'top':
                     self.selected_idx = 0
@@ -496,7 +497,7 @@ class RedundirTUI:
                     else:
                         self.bottom_selected_idx = 0
                     self.bottom_offset = 0
-            elif key == curses.KEY_END:
+            elif key in (curses.KEY_END, ord('>')):  # End or >
                 self.show_quit_message = False
                 if self.active_pane == 'top':
                     self.selected_idx = len(self.sorted_dirs) - 1
