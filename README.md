@@ -92,20 +92,20 @@ Supports scanning multiple directories just like the CLI tool.
 
 **Features:**
 - **Progress display**: Shows scanning progress before starting the TUI (just like CLI)
-- **Top pane**: List of directories with redundancy scores
-- **Bottom pane**: Shows for the selected directory:
-  - Related directories that share files (with hypothetical redundancy if current dir didn't exist)
-  - List of all duplicate files in the directory
-- **Active pane** is highlighted with bold border and can be navigated independently
-- Press `Tab` to switch between panes
-- **Smart navigation** in bottom pane skips headers and blank lines
-- **Directory jumping**: Press `Enter` or `→` on a related directory to jump to it; press `←` to go back through your history
+- **Top pane**: List of directories (sorted by redundancy, or filtered by selected file)
+- **Bottom pane**: Shows all files in the selected directory with:
+  - **Directory count column**: Shows how many directories contain each file
+  - **Sorted by count**: Most duplicated files first, unique files (count=1) last
+  - All files listed, not just duplicates
+- **Automatic filtering**: As you navigate files in the bottom pane, the top pane instantly updates to show only directories containing that file
+- **Drill down navigation**: Press `→`/`Enter`/`Tab` on a file to switch to the filtered top pane; press `←` to go back
+- **Active pane** is highlighted with bold border
+- **Smart navigation** in bottom pane skips headers
 
 **Keys:**
-- `Tab` - Switch between panes
-- `Enter` or `→` - Drill down (explore details)
-- `Esc` or `←` - Go back
-- `↑`/`↓` or `j`/`k` - Navigate items
+- `↑`/`↓` or `j`/`k` - Navigate (top pane auto-filters as you move through files in bottom pane)
+- `→` or `Enter` or `Tab` - Drill down / switch to filtered top pane
+- `←` or `Esc` - Go back / clear filter
 - `PgUp`/`PgDn` or `Ctrl-B`/`Ctrl-F` - Page up/down
 - `Home`/`End` or `<`/`>` - Jump to first/last item
 - `q` - Quit
