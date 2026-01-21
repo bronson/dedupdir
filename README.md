@@ -104,11 +104,26 @@ Supports scanning multiple directories just like the CLI tool.
 
 **Keys:**
 - `↑`/`↓` or `j`/`k` - Navigate (top pane auto-filters as you move through files in bottom pane)
-- `→` or `Enter` or `Tab` - Drill down / switch to filtered top pane
-- `←` or `Esc` - Go back / clear filter
+- `→`/`l` or `Enter` or `Tab` - Drill down / switch to filtered top pane
+- `←`/`h` or `Esc` - Go back / clear filter
 - `PgUp`/`PgDn` or `Ctrl-B`/`Ctrl-F` - Page up/down
 - `Home`/`End` or `<`/`>` - Jump to first/last item
+- `d` - Delete selected file or directory (moves to `~redundir-trash/` with confirmation for non-redundant items)
+- `u` - Undo last deletion (progressively restores deleted items)
+- `t` - Toggle trash viewer (`r` to restore items, `t` or `Esc` to exit)
 - `q` - Quit
+
+### Deletion & Cleanup
+
+The TUI includes a safe deletion system that moves files to `~redundir-trash/` (in each root directory) instead of permanently deleting them:
+
+- **Smart deletion**: Fully redundant items deleted immediately; non-redundant items require confirmation
+- **Progressive undo**: Press `u` repeatedly to undo recent deletions
+- **Trash viewer**: Press `t` to toggle trash view, restore with `r`, press `t` again to return
+- **Safe by design**: All items can be restored until you manually delete each root's `~redundir-trash/`
+- **Per-root trash**: Each root directory gets its own `~redundir-trash/` subdirectory (visible, not hidden)
+
+
 
 **Example (single directory):**
 ```

@@ -81,6 +81,9 @@ def find_duplicates(root_paths, algorithm: str = 'blake2b', jobs: int = 4, quiet
         for dirpath, dirnames, filenames in os.walk(root_path):
             dir_path = Path(dirpath)
 
+            # Skip trash directories
+            dirnames[:] = [d for d in dirnames if d != '~redundir-trash']
+
             for filename in filenames:
                 file_path = dir_path / filename
 

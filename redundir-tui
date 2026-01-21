@@ -10,7 +10,9 @@ This provides a split-pane interface for browsing duplicate files:
 import curses
 import sys
 import os
+import shutil
 from pathlib import Path
+from datetime import datetime
 
 # Import core functions from redundir by loading it directly
 def load_redundir():
@@ -84,6 +86,15 @@ class RedundirTUI:
         self.selected_file = None  # Currently selected file for filtering top pane
         self.current_filtered_dirs = []  # Filtered directory list when a file is selected
         self.current_bottom_dir = None  # The directory whose files are shown in bottom pane (doesn't change when navigating within bottom pane)
+
+        # Trash/deletion system (trash dirs are per-root, not in cwd)
+        self.deletion_stack = []  # Stack for undo: [(original_path, trash_path, is_dir), ...]
+        self.viewing_trash = False  # Whether we're in trash viewing mode
+        self.trash_selected_idx = 0
+        self.trash_offset = 0
+        self.confirm_delete_item = None  # Item pending confirmation
+        self.confirm_delete_type = None  # 'file' or 'directory'
+        self.show_no_duplicates_message = False  # Show message when no duplicates found
 
         # Data will be populated by scan()
         self.sorted_dirs = []
@@ -219,6 +230,285 @@ class RedundirTUI:
 
         # Fallback to original filename if not found
         return file_path.name
+
+    def get_trash_dir_for_root(self, root_path):
+        """Get the trash directory for a specific root."""
+        return root_path / '~redundir-trash'
+
+    def init_trash_dir_for_root(self, root_path):
+        """Initialize trash directory for a specific root if it doesn't exist."""
+        trash_dir = self.get_trash_dir_for_root(root_path)
+        if not trash_dir.exists():
+            trash_dir.mkdir(parents=True)
+        return trash_dir
+
+    def get_trash_items(self):
+        """Scan trash directories in all roots and return list of items with metadata."""
+        items = []
+
+        for root_path in self.root_paths:
+            trash_dir = self.get_trash_dir_for_root(root_path)
+            if not trash_dir.exists():
+                continue
+
+            # Walk through all files/dirs in this trash dir
+            for item in trash_dir.rglob('*'):
+                if item.is_file() or (item.is_dir() and not any(item.iterdir())):
+                    # It's a file or empty directory
+                    rel_to_trash = item.relative_to(trash_dir)
+                    original_path = root_path / rel_to_trash
+
+                    items.append({
+                        'original_path': str(original_path),
+                        'trash_path': str(item),
+                        'root_name': root_path.name,
+                        'relative_path': str(rel_to_trash),
+                        'type': 'file' if item.is_file() else 'directory',
+                        'timestamp': datetime.fromtimestamp(item.stat().st_ctime).isoformat()
+                    })
+
+        # Sort by timestamp (newest first)
+        items.sort(key=lambda x: x['timestamp'], reverse=True)
+        return items
+
+    def get_file_redundancy_count(self, file_path):
+        """Get how many directories contain this file (based on hash)."""
+        if file_path not in self.file_to_hash:
+            return 0
+        file_hash = self.file_to_hash[file_path]
+        return len(self.hash_to_dirs.get(file_hash, set()))
+
+    def is_dir_fully_redundant(self, dir_path):
+        """Check if all files in directory exist in other directories."""
+        files = self.dir_all_files.get(dir_path, [])
+        if not files:
+            return True
+
+        num_roots = len(self.root_paths)
+        for fpath in files:
+            count = self.get_file_redundancy_count(fpath)
+            if count < num_roots:
+                return False
+        return True
+
+    def delete_item(self, item_path, item_type):
+        """Move item to trash and update data structures."""
+        item_path = Path(item_path)
+
+        # Find which root this item belongs to
+        root_for_item = None
+        for root in self.root_paths:
+            try:
+                item_path.relative_to(root)
+                root_for_item = root
+                break
+            except ValueError:
+                continue
+
+        if not root_for_item:
+            return False
+
+        # Initialize trash dir for this root
+        trash_dir = self.init_trash_dir_for_root(root_for_item)
+
+        # Create relative path from root
+        rel_path = item_path.relative_to(root_for_item)
+
+        # Create trash path (directly under trash dir, preserving structure)
+        trash_path = trash_dir / rel_path
+        trash_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Move to trash
+        try:
+            shutil.move(str(item_path), str(trash_path))
+        except Exception as e:
+            return False
+
+        # Add to undo stack (store simple tuple)
+        self.deletion_stack.append((str(item_path), str(trash_path), item_type == 'directory'))
+
+        # Update data structures
+        if item_type == 'file':
+            # If we're deleting the selected file, we need to update the selection
+            # to point to another copy (if any exist) or clear it
+            if self.selected_file == item_path:
+                # Get the hash before we remove the file
+                file_hash = self.file_to_hash.get(item_path)
+
+                # Remove the file
+                self.remove_file_from_data(item_path)
+
+                # Try to find another file with the same hash
+                if file_hash and file_hash in self.hash_to_dirs:
+                    # Find any remaining file with this hash
+                    for remaining_dir in self.hash_to_dirs[file_hash]:
+                        for remaining_file in self.dir_all_files.get(remaining_dir, []):
+                            if remaining_file in self.file_to_hash and self.file_to_hash[remaining_file] == file_hash:
+                                # Found a replacement - update selected_file
+                                self.selected_file = remaining_file
+                                break
+                        if self.selected_file != item_path:
+                            break
+                    else:
+                        # No remaining copies found, clear the filter
+                        self.selected_file = None
+                else:
+                    # No hash or no remaining directories, clear the filter
+                    self.selected_file = None
+            else:
+                self.remove_file_from_data(item_path)
+        else:  # directory
+            self.remove_directory_from_data(item_path)
+
+        # Recalculate sorted_dirs
+        self.sorted_dirs = sorted(
+            self.dir_stats.items(),
+            key=lambda x: (-calculate_redundancy_score(x[1][0], x[1][1]), str(x[0]))
+        )
+
+        return True
+
+    def remove_file_from_data(self, file_path):
+        """Remove a file from internal data structures."""
+        if file_path not in self.file_to_hash:
+            return
+
+        file_hash = self.file_to_hash[file_path]
+        parent_dir = file_path.parent
+
+        # Get all directories that will be affected by this deletion
+        # (all directories that have files with this hash)
+        affected_dirs = set()
+        if file_hash in self.hash_to_dirs:
+            affected_dirs = self.hash_to_dirs[file_hash].copy()
+
+        # Remove file from dir_all_files
+        if parent_dir in self.dir_all_files:
+            if file_path in self.dir_all_files[parent_dir]:
+                self.dir_all_files[parent_dir].remove(file_path)
+
+        # Remove the directory from hash_to_dirs
+        if file_hash in self.hash_to_dirs:
+            self.hash_to_dirs[file_hash].discard(parent_dir)
+
+            # If no more directories have this hash, remove it
+            if not self.hash_to_dirs[file_hash]:
+                del self.hash_to_dirs[file_hash]
+
+        # Remove from file_to_hash
+        del self.file_to_hash[file_path]
+
+        # Recalculate stats for ALL affected directories
+        # (not just the one we deleted from, but all that had this hash)
+        for dir_path in affected_dirs:
+            if dir_path in self.dir_stats or dir_path in self.dir_all_files:
+                # Recalculate duplicates for this directory
+                new_dup = 0
+                for f in self.dir_all_files.get(dir_path, []):
+                    if f in self.file_to_hash:
+                        fh = self.file_to_hash[f]
+                        if len(self.hash_to_dirs.get(fh, set())) > 1:
+                            new_dup += 1
+                new_total = len(self.dir_all_files.get(dir_path, []))
+
+                # Update or remove from dir_stats
+                if new_total > 0 and new_dup > 0:
+                    self.dir_stats[dir_path] = (new_dup, new_total)
+                elif dir_path in self.dir_stats:
+                    del self.dir_stats[dir_path]
+
+    def remove_directory_from_data(self, dir_path):
+        """Remove a directory and all its files from internal data structures."""
+        # Get all files in this directory
+        files_to_remove = self.dir_all_files.get(dir_path, [])[:]
+
+        # Remove each file
+        for file_path in files_to_remove:
+            self.remove_file_from_data(file_path)
+
+        # Remove directory from dir_all_files and dir_stats
+        if dir_path in self.dir_all_files:
+            del self.dir_all_files[dir_path]
+        if dir_path in self.dir_stats:
+            del self.dir_stats[dir_path]
+
+    def undo_last_deletion(self):
+        """Undo the most recent deletion."""
+        if not self.deletion_stack:
+            return False
+
+        original_path_str, trash_path_str, is_dir = self.deletion_stack.pop()
+        trash_path = Path(trash_path_str)
+        original_path = Path(original_path_str)
+
+        # Move back from trash
+        try:
+            original_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(trash_path), str(original_path))
+        except Exception as e:
+            # Put it back on stack if restore failed
+            self.deletion_stack.append((original_path_str, trash_path_str, is_dir))
+            return False
+
+        # Clean up empty directories in trash
+        self.cleanup_empty_trash_dirs(trash_path.parent)
+
+        # Rescan to update data structures
+        self.scan(quiet=True)
+
+        return True
+
+    def restore_from_trash(self, trash_record):
+        """Restore an item from trash by its metadata record."""
+        trash_path = Path(trash_record['trash_path'])
+        original_path = Path(trash_record['original_path'])
+
+        if not trash_path.exists():
+            return False
+
+        try:
+            original_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(trash_path), str(original_path))
+        except Exception as e:
+            return False
+
+        # Clean up empty directories in trash
+        self.cleanup_empty_trash_dirs(trash_path.parent)
+
+        # Remove from deletion stack if present
+        self.deletion_stack = [d for d in self.deletion_stack if d[1] != trash_record['trash_path']]
+
+        # Rescan to update data structures
+        self.scan(quiet=True)
+
+        return True
+
+    def cleanup_empty_trash_dirs(self, start_dir):
+        """Remove empty directories in trash, walking up from start_dir."""
+        if not start_dir.exists():
+            return
+
+        # Walk up from start_dir, removing empty directories
+        current = start_dir
+        while current.exists() and current.is_dir():
+            # Check if this is a trash directory (don't delete the trash root itself)
+            is_trash_root = any(current == self.get_trash_dir_for_root(root) for root in self.root_paths)
+            if is_trash_root:
+                break
+
+            # Check if directory is empty
+            try:
+                if not any(current.iterdir()):
+                    # Directory is empty, remove it
+                    current.rmdir()
+                    # Move up to parent
+                    current = current.parent
+                else:
+                    # Directory not empty, stop
+                    break
+            except (OSError, PermissionError):
+                # Can't remove or access, stop
+                break
 
     def draw_top_pane(self, win, height, width):
         """Draw the directory list in the top pane."""
@@ -436,6 +726,131 @@ class RedundirTUI:
         self.bottom_line_to_dir = line_to_dir
         self.bottom_line_to_file = line_to_file
 
+    def draw_trash_pane(self, win, height, width):
+        """Draw the trash viewer in full screen."""
+        win.clear()
+        win.border()
+
+        title = " Trash (~redundir-trash) - Press 'r' to restore, 't' to toggle back, Esc to exit "
+        win.addstr(0, 2, title[:width-4], curses.A_BOLD | curses.A_REVERSE)
+
+        # Show "no duplicates" message if applicable
+        if self.show_no_duplicates_message:
+            msg = "No duplicate files found. You can restore files from trash below, or press 'q' to quit."
+            try:
+                win.addstr(2, 2, msg[:width-4], curses.A_BOLD)
+            except curses.error:
+                pass
+
+        items = self.get_trash_items()
+
+        if not items:
+            msg_y = 4 if self.show_no_duplicates_message else 2
+            win.addstr(msg_y, 2, "Trash is empty", curses.A_DIM)
+            if self.show_no_duplicates_message:
+                win.addstr(msg_y + 2, 2, "Press 'q' to quit.", curses.A_DIM)
+            win.refresh()
+            return
+
+        # Display trash items
+        start_y = 4 if self.show_no_duplicates_message else 1
+        display_height = (height - start_y - 1) if self.show_no_duplicates_message else (height - 2)
+        for i in range(display_height):
+            idx = self.trash_offset + i
+            if idx >= len(items):
+                break
+
+            item = items[idx]
+            item_type = item.get('type', 'unknown')
+            rel_path = item.get('relative_path', 'unknown')
+            root_name = item.get('root_name', '')
+            timestamp = item.get('timestamp', '')[:19]  # YYYY-MM-DDTHH:MM:SS
+
+            # Format: [type] root/path with timestamp on right
+            type_icon = "📄" if item_type == "file" else "📁"
+            path_part = f"{type_icon} {root_name}/{rel_path}"
+
+            # Format timestamp as "MMM DD HH:MM" (e.g., "Jan 20 14:23")
+            # This is the ctime (inode change time), which approximates when the file was moved to trash
+            if len(timestamp) >= 16:
+                try:
+                    dt = datetime.fromisoformat(timestamp)
+                    time_part = dt.strftime("%b %d %H:%M")  # "Jan 20 14:23"
+                except:
+                    time_part = timestamp[5:16]  # Fallback: "MM-DD HH:MM"
+            else:
+                time_part = timestamp
+
+            y = i + start_y
+            attr = curses.A_REVERSE if idx == self.trash_selected_idx else curses.A_NORMAL
+
+            try:
+                # Calculate available space for path
+                timestamp_width = len(time_part) + 2  # Add padding
+                path_max_width = width - timestamp_width - 3
+
+                # Truncate path if needed
+                if len(path_part) > path_max_width:
+                    path_part = path_part[:path_max_width-3] + "..."
+
+                # Draw path on left
+                win.addstr(y, 1, path_part, attr)
+
+                # Draw timestamp on right
+                time_x = width - timestamp_width - 1
+                win.addstr(y, time_x, time_part, attr | curses.A_DIM)
+            except curses.error:
+                pass
+
+        # Scrollbar indicator
+        if len(items) > display_height:
+            indicator = f" [{self.trash_offset + 1}-{min(self.trash_offset + display_height, len(items))}/{len(items)}] "
+            try:
+                win.addstr(height - 1, width - len(indicator) - 1, indicator, curses.A_DIM)
+            except curses.error:
+                pass
+
+        win.refresh()
+
+    def draw_confirmation_dialog(self, stdscr, message):
+        """Draw a confirmation dialog in the center of the screen."""
+        height, width = stdscr.getmaxyx()
+
+        # Dialog dimensions
+        dialog_height = 7
+        dialog_width = min(60, width - 4)
+        dialog_y = (height - dialog_height) // 2
+        dialog_x = (width - dialog_width) // 2
+
+        # Create dialog window
+        dialog = curses.newwin(dialog_height, dialog_width, dialog_y, dialog_x)
+        dialog.clear()
+        dialog.box()
+
+        # Draw message (word wrap if needed)
+        lines = []
+        words = message.split()
+        current_line = ""
+        for word in words:
+            if len(current_line) + len(word) + 1 <= dialog_width - 4:
+                current_line += (" " if current_line else "") + word
+            else:
+                lines.append(current_line)
+                current_line = word
+        if current_line:
+            lines.append(current_line)
+
+        # Draw message lines
+        for i, line in enumerate(lines[:3]):  # Max 3 lines
+            dialog.addstr(1 + i, 2, line, curses.A_BOLD)
+
+        # Draw prompt
+        prompt = "Delete anyway? (y/n)"
+        dialog.addstr(dialog_height - 2, (dialog_width - len(prompt)) // 2, prompt, curses.A_REVERSE)
+
+        dialog.refresh()
+        return dialog
+
     def run(self, stdscr):
         """Main TUI loop."""
         curses.curs_set(0)  # Hide cursor
@@ -456,31 +871,118 @@ class RedundirTUI:
         stdscr.refresh()
 
         if not self.sorted_dirs:
-            stdscr.clear()
-            stdscr.addstr(height // 2, width // 2 - 12, "No duplicate files found.", curses.A_BOLD)
-            stdscr.addstr(height // 2 + 1, width // 2 - 10, "Press any key to exit.")
-            stdscr.refresh()
-            stdscr.getch()
-            return
+            # No duplicates found - show trash viewer instead of exiting
+            # This allows user to restore files if they deleted too much
+            self.viewing_trash = True
+            self.trash_selected_idx = 0
+            self.trash_offset = 0
+            self.show_no_duplicates_message = True
+        else:
+            self.show_no_duplicates_message = False
 
         # Main loop
         while True:
             height, width = stdscr.getmaxyx()
 
-            # Split screen: top 40%, bottom 60%
-            top_height = max(5, height * 2 // 5)
-            bottom_height = height - top_height
-
-            # Create windows
-            top_win = curses.newwin(top_height, width, 0, 0)
-            bottom_win = curses.newwin(bottom_height, width, top_height, 0)
-
-            # Draw panes
-            self.draw_top_pane(top_win, top_height, width)
-            self.draw_bottom_pane(bottom_win, bottom_height, width)
+            # Draw based on current mode
+            if self.viewing_trash:
+                # Trash viewer mode - full screen
+                trash_win = curses.newwin(height, width, 0, 0)
+                self.draw_trash_pane(trash_win, height, width)
+            elif self.confirm_delete_item is not None:
+                # Confirmation dialog mode - draw normal panes + dialog
+                top_height = max(5, height * 2 // 5)
+                bottom_height = height - top_height
+                top_win = curses.newwin(top_height, width, 0, 0)
+                bottom_win = curses.newwin(bottom_height, width, top_height, 0)
+                self.draw_top_pane(top_win, top_height, width)
+                self.draw_bottom_pane(bottom_win, bottom_height, width)
+                # Draw confirmation dialog on top
+                rel_path = self.get_relative_path(self.confirm_delete_item)
+                message = f"'{rel_path}' is not fully redundant across all roots."
+                self.draw_confirmation_dialog(stdscr, message)
+            else:
+                # Normal mode - split screen
+                top_height = max(5, height * 2 // 5)
+                bottom_height = height - top_height
+                top_win = curses.newwin(top_height, width, 0, 0)
+                bottom_win = curses.newwin(bottom_height, width, top_height, 0)
+                self.draw_top_pane(top_win, top_height, width)
+                self.draw_bottom_pane(bottom_win, bottom_height, width)
 
             # Handle input
             key = stdscr.getch()
+
+            # Handle confirmation dialog first (takes priority)
+            if self.confirm_delete_item is not None:
+                if key in (ord('q'), ord('Q')):  # Q key - quit immediately
+                    break
+                elif key in (ord('y'), ord('Y')):
+                    # Confirmed - proceed with deletion
+                    item_path, item_type = self.confirm_delete_item, self.confirm_delete_type
+                    self.delete_item(item_path, item_type)
+                    self.confirm_delete_item = None
+                    self.confirm_delete_type = None
+                    continue
+                elif key in (ord('n'), ord('N'), 27):  # n, N, or ESC
+                    # Cancelled
+                    self.confirm_delete_item = None
+                    self.confirm_delete_type = None
+                    continue
+                else:
+                    # Ignore other keys in confirmation mode
+                    continue
+
+            # Handle trash viewing mode (takes priority)
+            if self.viewing_trash:
+                if key in (ord('q'), ord('Q')):  # Q key - quit immediately
+                    break
+                elif key in (ord('t'), ord('T')):  # t to toggle back to main view
+                    # If no duplicates found, don't allow toggle back (nothing to show)
+                    if not self.show_no_duplicates_message:
+                        self.viewing_trash = False
+                    continue
+                elif key == 27:  # ESC to exit trash view
+                    # If no duplicates found, don't allow toggle back (nothing to show)
+                    if not self.show_no_duplicates_message:
+                        self.viewing_trash = False
+                    continue
+                elif key in (curses.KEY_UP, ord('k')):
+                    items = self.get_trash_items()
+                    if self.trash_selected_idx > 0:
+                        self.trash_selected_idx -= 1
+                        if self.trash_selected_idx < self.trash_offset:
+                            self.trash_offset = self.trash_selected_idx
+                elif key in (curses.KEY_DOWN, ord('j')):
+                    items = self.get_trash_items()
+                    if self.trash_selected_idx < len(items) - 1:
+                        self.trash_selected_idx += 1
+                        if self.trash_selected_idx >= self.trash_offset + (height - 2):
+                            self.trash_offset = self.trash_selected_idx - (height - 2) + 1
+                elif key in (ord('r'), ord('R')):  # Restore selected item
+                    items = self.get_trash_items()
+                    if items and self.trash_selected_idx < len(items):
+                        if self.restore_from_trash(items[self.trash_selected_idx]):
+                            # Adjust selection if needed
+                            items = self.get_trash_items()
+                            if self.trash_selected_idx >= len(items) and len(items) > 0:
+                                self.trash_selected_idx = len(items) - 1
+
+                            # Check if we now have duplicates after restoration
+                            if self.show_no_duplicates_message and self.sorted_dirs:
+                                # Duplicates found again! Exit trash mode and show main view
+                                self.show_no_duplicates_message = False
+                                self.viewing_trash = False
+                                continue
+                elif key in (curses.KEY_HOME, ord('<')):
+                    self.trash_selected_idx = 0
+                    self.trash_offset = 0
+                elif key in (curses.KEY_END, ord('>')):
+                    items = self.get_trash_items()
+                    self.trash_selected_idx = max(0, len(items) - 1)
+                    self.trash_offset = max(0, len(items) - (height - 2))
+                # Continue to redraw at top of loop
+                continue
 
             # Tab to switch panes
             if key == ord('\t'):  # Tab key
@@ -610,6 +1112,57 @@ class RedundirTUI:
             # Q key - quit immediately
             if key in (ord('q'), ord('Q')):
                 break
+            # T key - toggle trash view
+            elif key in (ord('t'), ord('T')):
+                if not self.viewing_trash:
+                    self.viewing_trash = True
+                    self.trash_selected_idx = 0
+                    self.trash_offset = 0
+                continue
+            # U key - undo last deletion
+            elif key in (ord('u'), ord('U')):
+                self.undo_last_deletion()
+                continue
+            # D key - delete item
+            elif key == ord('d'):
+                item_to_delete = None
+                delete_type = None
+
+                if self.active_pane == 'top':
+                    # Delete selected directory
+                    dirs_to_use = self.current_filtered_dirs if self.current_filtered_dirs else self.sorted_dirs
+                    if self.selected_idx < len(dirs_to_use):
+                        dir_path = dirs_to_use[self.selected_idx][0]
+                        item_to_delete = dir_path
+                        delete_type = 'directory'
+                elif self.active_pane == 'bottom':
+                    # Delete selected file
+                    if hasattr(self, 'bottom_line_to_file') and self.bottom_selected_idx in self.bottom_line_to_file:
+                        file_path = self.bottom_line_to_file[self.bottom_selected_idx]
+                        item_to_delete = file_path
+                        delete_type = 'file'
+
+                if item_to_delete:
+                    # Check if fully redundant
+                    needs_confirmation = False
+                    num_roots = len(self.root_paths)
+
+                    if delete_type == 'file':
+                        count = self.get_file_redundancy_count(item_to_delete)
+                        if count < num_roots:
+                            needs_confirmation = True
+                    else:  # directory
+                        if not self.is_dir_fully_redundant(item_to_delete):
+                            needs_confirmation = True
+
+                    if needs_confirmation:
+                        # Set confirmation state - will be drawn at top of loop
+                        self.confirm_delete_item = item_to_delete
+                        self.confirm_delete_type = delete_type
+                    else:
+                        # Delete immediately
+                        self.delete_item(item_to_delete, delete_type)
+                continue
             elif key in (curses.KEY_UP, ord('k')):
                 self.show_quit_message = False
                 if self.active_pane == 'top':
