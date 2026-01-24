@@ -760,6 +760,82 @@ class DedupdirTUI:
         except:
             return "-----"
 
+    def needs_scroll_indicators(self, scroll_offset, total_items, visible_height):
+        """Check if scroll indicators are needed.
+
+        Returns (needs_top, needs_bottom) tuple.
+        """
+        if total_items <= visible_height:
+            return False, False
+        needs_top = scroll_offset > 0
+        needs_bottom = scroll_offset + visible_height < total_items
+        return needs_top, needs_bottom
+
+    def draw_scroll_indicators(self, win, height, width, scroll_offset, total_items, visible_height, content_start_y=1):
+        """Draw scroll bar and more-content arrows.
+
+        Args:
+            win: curses window
+            height: window height
+            width: window width
+            scroll_offset: current scroll position
+            total_items: total number of items
+            visible_height: number of visible lines for content
+            content_start_y: y position where content starts (for top arrow)
+        """
+        needs_top, needs_bottom = self.needs_scroll_indicators(scroll_offset, total_items, visible_height)
+
+        if not needs_top and not needs_bottom:
+            return  # No scrolling needed
+
+        # Draw up indicator on its own line if content above
+        if needs_top:
+            try:
+                indicator = "    ▲ ▲   more   ▲ ▲"
+                win.addstr(content_start_y, 1, indicator, curses.A_BOLD)
+            except curses.error:
+                pass
+
+        # Draw down indicator on its own line if content below
+        if needs_bottom:
+            try:
+                indicator = "    ▼ ▼   more   ▼ ▼"
+                win.addstr(height - 2, 1, indicator, curses.A_BOLD)
+            except curses.error:
+                pass
+
+        # Calculate scrollbar area (accounting for indicator lines)
+        scrollbar_start_y = content_start_y + (1 if needs_top else 0)
+        scrollbar_end_y = height - 2 - (1 if needs_bottom else 0)
+        scrollbar_height = scrollbar_end_y - scrollbar_start_y
+
+        if scrollbar_height < 3:
+            return  # Not enough room for scroll bar
+
+        # Calculate thumb size and position
+        visible_ratio = visible_height / total_items
+        thumb_size = max(1, int(scrollbar_height * visible_ratio))
+
+        scroll_range = total_items - visible_height
+        if scroll_range > 0:
+            scroll_ratio = scroll_offset / scroll_range
+            thumb_pos = int((scrollbar_height - thumb_size) * scroll_ratio)
+        else:
+            thumb_pos = 0
+
+        # Draw scroll bar track and thumb
+        for i in range(scrollbar_height):
+            y = scrollbar_start_y + i
+            if y >= height - 2:
+                break
+            try:
+                if i >= thumb_pos and i < thumb_pos + thumb_size:
+                    win.addstr(y, width - 2, "█", curses.A_DIM)
+                else:
+                    win.addstr(y, width - 2, "│", curses.A_DIM)
+            except curses.error:
+                pass
+
     def draw_main_view(self, win, height, width, selected_idx, scroll_offset):
         """Draw the main directory list view."""
         win.clear()
@@ -827,7 +903,13 @@ class DedupdirTUI:
 
         # Display items
         display_height = height - 3  # Account for border, header, and bottom border
-        for i in range(display_height):
+
+        # Check if we need scroll indicators (they take up content lines)
+        needs_top, needs_bottom = self.needs_scroll_indicators(scroll_offset, len(display_list), display_height)
+        content_lines = display_height - (1 if needs_top else 0) - (1 if needs_bottom else 0)
+        start_offset = 1 if needs_top else 0
+
+        for i in range(content_lines):
             idx = scroll_offset + i
             if idx >= len(display_list):
                 break
@@ -910,12 +992,15 @@ class DedupdirTUI:
                 if len(line) > max_len:
                     line = line[:max_len-3] + "..."
 
-            y = i + 2  # Start after header
+            y = i + 2 + start_offset  # Start after header (and top indicator if present)
             attr = curses.A_REVERSE if idx == selected_idx else curses.A_NORMAL
             try:
-                win.addstr(y, 1, line.ljust(width - 2), attr)
+                win.addstr(y, 1, line.ljust(width - 4), attr)  # Leave room for scroll bar
             except curses.error:
                 pass
+
+        # Draw scroll indicators
+        self.draw_scroll_indicators(win, height, width, scroll_offset, len(display_list), display_height, content_start_y=2)
 
         win.refresh()
 
@@ -957,7 +1042,13 @@ class DedupdirTUI:
 
         # Display files
         display_height = height - 5  # Account for border, title, section header, column header
-        for i in range(display_height):
+
+        # Check if we need scroll indicators (they take up content lines)
+        needs_top, needs_bottom = self.needs_scroll_indicators(scroll_offset, len(files), display_height)
+        content_lines = display_height - (1 if needs_top else 0) - (1 if needs_bottom else 0)
+        start_offset = 1 if needs_top else 0
+
+        for i in range(content_lines):
             idx = scroll_offset + i
             if idx >= len(files):
                 break
@@ -1002,12 +1093,15 @@ class DedupdirTUI:
                 # Truncate left part
                 line = left_part[:max_len-3] + "..."
 
-            y = i + 4  # Start after headers
+            y = i + 4 + start_offset  # Start after headers (and top indicator if present)
             attr = curses.A_REVERSE if idx == selected_idx else curses.A_NORMAL
             try:
-                win.addstr(y, 1, line.ljust(width - 2), attr)
+                win.addstr(y, 1, line.ljust(width - 4), attr)  # Leave room for scroll bar
             except curses.error:
                 pass
+
+        # Draw scroll indicators
+        self.draw_scroll_indicators(win, height, width, scroll_offset, len(files), display_height, content_start_y=4)
 
         win.refresh()
 
@@ -1040,8 +1134,14 @@ class DedupdirTUI:
 
         # Display directories
         display_height = height - 5
-        for i in range(display_height):
-            idx = scroll_offset + i
+
+        # Check if we need scroll indicators (they take up content lines)
+        needs_top, needs_bottom = self.needs_scroll_indicators(self.scroll_offset, len(dirs_with_file), display_height)
+        content_lines = display_height - (1 if needs_top else 0) - (1 if needs_bottom else 0)
+        start_offset = 1 if needs_top else 0
+
+        for i in range(content_lines):
+            idx = self.scroll_offset + i
             if idx >= len(dirs_with_file):
                 break
 
@@ -1064,12 +1164,15 @@ class DedupdirTUI:
             if len(line) > max_len:
                 line = line[:max_len-3] + "..."
 
-            y = i + 4
+            y = i + 4 + start_offset  # Account for top indicator if present
             attr = curses.A_REVERSE if idx == selected_idx else curses.A_NORMAL
             try:
-                win.addstr(y, 1, line.ljust(width - 2), attr)
+                win.addstr(y, 1, line.ljust(width - 4), attr)  # Leave room for scroll bar
             except curses.error:
                 pass
+
+        # Draw scroll indicators
+        self.draw_scroll_indicators(win, height, width, self.scroll_offset, len(dirs_with_file), display_height, content_start_y=4)
 
         win.refresh()
     def draw_trash_pane(self, win, height, width):
@@ -1101,7 +1204,13 @@ class DedupdirTUI:
         # Display trash items
         start_y = 4 if self.show_no_duplicates_message else 1
         display_height = (height - start_y - 1) if self.show_no_duplicates_message else (height - 2)
-        for i in range(display_height):
+
+        # Check if we need scroll indicators (they take up content lines)
+        needs_top, needs_bottom = self.needs_scroll_indicators(self.trash_offset, len(items), display_height)
+        content_lines = display_height - (1 if needs_top else 0) - (1 if needs_bottom else 0)
+        indicator_offset = 1 if needs_top else 0
+
+        for i in range(content_lines):
             idx = self.trash_offset + i
             if idx >= len(items):
                 break
@@ -1127,7 +1236,7 @@ class DedupdirTUI:
             else:
                 time_part = timestamp
 
-            y = i + start_y
+            y = i + start_y + indicator_offset  # Account for top indicator if present
             attr = curses.A_REVERSE if idx == self.trash_selected_idx else curses.A_NORMAL
 
             try:
@@ -1148,13 +1257,8 @@ class DedupdirTUI:
             except curses.error:
                 pass
 
-        # Scrollbar indicator
-        if len(items) > display_height:
-            indicator = f" [{self.trash_offset + 1}-{min(self.trash_offset + display_height, len(items))}/{len(items)}] "
-            try:
-                win.addstr(height - 1, width - len(indicator) - 1, indicator, curses.A_DIM)
-            except curses.error:
-                pass
+        # Draw scroll indicators
+        self.draw_scroll_indicators(win, height, width, self.trash_offset, len(items), display_height, content_start_y=start_y)
 
         win.refresh()
 
@@ -1316,21 +1420,15 @@ class DedupdirTUI:
             line_idx = scroll_offset + i
             if line_idx < len(content_lines):
                 line = content_lines[line_idx]
-                # Truncate line to fit width
-                display_line = line[:width-3]
+                # Truncate line to fit width (leave room for scroll bar)
+                display_line = line[:width-5]
                 try:
                     viewer_win.addstr(content_start_y + i, 1, display_line)
                 except curses.error:
                     pass  # Ignore errors from writing to last position
 
-        # Draw scrollbar indicator if needed
-        if len(content_lines) > content_height:
-            percent = (scroll_offset / max_offset * 100) if max_offset > 0 else 0
-            status = f" {percent:.0f}% ({scroll_offset + 1}-{min(scroll_offset + content_height, len(content_lines))} of {len(content_lines)}) "
-            try:
-                viewer_win.addstr(height - 1, width - len(status) - 2, status, curses.A_REVERSE)
-            except curses.error:
-                pass
+        # Draw scroll indicators
+        self.draw_scroll_indicators(viewer_win, height, width, scroll_offset, len(content_lines), content_height, content_start_y=content_start_y)
 
         viewer_win.refresh()
         return scroll_offset, len(content_lines)

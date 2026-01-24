@@ -4,6 +4,7 @@
 * convert the two-pane UI back to single-pane and simplify the file view
 * automatically collapse child dirs when they're 100% redundant
 * confirm quitting unless you're at the top level
+* add scroll indicators to panes
 
 ## [0.1.0] - 2026-01-21
 * Rename project from redundir to dedupdir.
