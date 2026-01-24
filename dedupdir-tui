@@ -732,19 +732,38 @@ class DedupdirTUI:
                     del self.dir_stats[dir_path]
 
     def remove_directory_from_data(self, dir_path):
-        """Remove a directory and all its files from internal data structures."""
-        # Get all files in this directory
-        files_to_remove = self.dir_all_files.get(dir_path, [])[:]
+        """Remove a directory and all its files from internal data structures.
 
-        # Remove each file
-        for file_path in files_to_remove:
-            self.remove_file_from_data(file_path)
+        Also removes any child directories that are inside the removed directory.
+        """
+        # Find all directories that are children of dir_path (including dir_path itself)
+        dirs_to_remove = [dir_path]
+        for other_dir in list(self.dir_all_files.keys()):
+            if other_dir != dir_path and self.is_subdir(other_dir, dir_path):
+                dirs_to_remove.append(other_dir)
 
-        # Remove directory from dir_all_files and dir_stats
-        if dir_path in self.dir_all_files:
-            del self.dir_all_files[dir_path]
-        if dir_path in self.dir_stats:
-            del self.dir_stats[dir_path]
+        # Also check dir_stats for directories that might not be in dir_all_files
+        for other_dir in list(self.dir_stats.keys()):
+            if other_dir != dir_path and other_dir not in dirs_to_remove and self.is_subdir(other_dir, dir_path):
+                dirs_to_remove.append(other_dir)
+
+        # Remove each directory and its files
+        for dir_to_remove in dirs_to_remove:
+            # Get all files in this directory
+            files_to_remove = self.dir_all_files.get(dir_to_remove, [])[:]
+
+            # Remove each file
+            for file_path in files_to_remove:
+                self.remove_file_from_data(file_path)
+
+            # Remove directory from dir_all_files and dir_stats
+            if dir_to_remove in self.dir_all_files:
+                del self.dir_all_files[dir_to_remove]
+            if dir_to_remove in self.dir_stats:
+                del self.dir_stats[dir_to_remove]
+
+        # Clean up expanded_groups if the removed directory was expanded
+        self.expanded_groups.discard(dir_path)
 
     def undo_last_trash(self):
         """Undo the most recent trash operation."""
