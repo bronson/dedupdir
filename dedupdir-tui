@@ -561,6 +561,23 @@ class DedupdirTUI:
             return len(self.get_dirs_containing_file(file_path))
         return 0
 
+    def get_current_visible_lines(self, usable_height):
+        """Get the number of visible content lines for the current view.
+
+        This accounts for view type and stack depth (overlay indentation).
+        """
+        view = self.get_current_view()
+        level_idx = len(self.view_stack) - 1
+
+        if view['type'] == 'main':
+            # Main view: height - 3 for border/header, but navigation uses -5
+            return usable_height - 5
+        else:
+            # Overlay views are indented by level_idx rows
+            overlay_height = usable_height - level_idx
+            # dir_detail and file_detail both use height - 5 for display_height
+            return overlay_height - 5
+
     def get_current_stats(self):
         """Calculate current statistics: total files, duplicate files, and duplication percentage.
 
@@ -832,13 +849,12 @@ class DedupdirTUI:
         """Check if scroll indicators are needed.
 
         Returns (needs_top, needs_bottom) tuple.
+        Indicators overlay content, so they don't reduce visible space.
         """
         if total_items <= visible_height:
             return False, False
         needs_top = scroll_offset > 0
-        # When there's a top indicator, it takes one line from content area
-        effective_content = visible_height - (1 if needs_top else 0)
-        needs_bottom = scroll_offset + effective_content < total_items
+        needs_bottom = scroll_offset + visible_height < total_items
         return needs_top, needs_bottom
 
     def draw_position_indicator(self, win, height, width, scroll_offset, total_items, visible_height):
@@ -846,19 +862,16 @@ class DedupdirTUI:
         if total_items <= 0:
             return
 
-        # Account for indicator lines when calculating effective visible height
-        needs_top, needs_bottom = self.needs_scroll_indicators(scroll_offset, total_items, visible_height)
-        effective_visible = visible_height - (1 if needs_top else 0) - (1 if needs_bottom else 0)
-
-        if total_items <= effective_visible:
+        # Indicators overlay content, so visible_height is the actual visible count
+        if total_items <= visible_height:
             # All items visible
             status = f" 1-{total_items} of {total_items} "
         else:
-            max_offset = total_items - effective_visible
+            max_offset = total_items - visible_height
             # Clamp percent to 0-100 range
             percent = min(100, max(0, (scroll_offset / max_offset * 100))) if max_offset > 0 else 0
             first = scroll_offset + 1
-            last = min(scroll_offset + effective_visible, total_items)
+            last = min(scroll_offset + visible_height, total_items)
             status = f" {percent:.0f}% ({first}-{last} of {total_items}) "
 
         try:
@@ -1140,12 +1153,8 @@ class DedupdirTUI:
         # Display files
         display_height = height - 5  # Account for border, title, section header, column header
 
-        # Check if we need scroll indicators (they take up content lines)
-        needs_top, needs_bottom = self.needs_scroll_indicators(scroll_offset, len(files), display_height)
-        content_lines = display_height - (1 if needs_top else 0) - (1 if needs_bottom else 0)
-        start_offset = 1 if needs_top else 0
-
-        for i in range(content_lines):
+        # Draw files (indicators will overlay first/last lines)
+        for i in range(display_height):
             idx = scroll_offset + i
             if idx >= len(files):
                 break
@@ -1190,7 +1199,7 @@ class DedupdirTUI:
                 # Truncate left part
                 line = left_part[:max_len-3] + "..."
 
-            y = i + 4 + start_offset  # Start after headers (and top indicator if present)
+            y = i + 4  # Start after headers
             attr = curses.A_REVERSE if idx == selected_idx else curses.A_NORMAL
             try:
                 win.addstr(y, 1, line.ljust(width - 4), attr)  # Leave room for scroll bar
@@ -1232,12 +1241,8 @@ class DedupdirTUI:
         # Display directories
         display_height = height - 5
 
-        # Check if we need scroll indicators (they take up content lines)
-        needs_top, needs_bottom = self.needs_scroll_indicators(self.scroll_offset, len(dirs_with_file), display_height)
-        content_lines = display_height - (1 if needs_top else 0) - (1 if needs_bottom else 0)
-        start_offset = 1 if needs_top else 0
-
-        for i in range(content_lines):
+        # Draw directories (indicators will overlay first/last lines)
+        for i in range(display_height):
             idx = self.scroll_offset + i
             if idx >= len(dirs_with_file):
                 break
@@ -1261,7 +1266,7 @@ class DedupdirTUI:
             if len(line) > max_len:
                 line = line[:max_len-3] + "..."
 
-            y = i + 4 + start_offset  # Account for top indicator if present
+            y = i + 4  # Start after headers
             attr = curses.A_REVERSE if idx == selected_idx else curses.A_NORMAL
             try:
                 win.addstr(y, 1, line.ljust(width - 4), attr)  # Leave room for scroll bar
@@ -2353,15 +2358,15 @@ Actions:
             elif key in (curses.KEY_DOWN, ord('j')):
                 if self.selected_idx < list_size - 1:
                     self.selected_idx += 1
-                    visible_lines = usable_height - 5
+                    visible_lines = self.get_current_visible_lines(usable_height)
                     if self.selected_idx >= self.scroll_offset + visible_lines:
                         self.scroll_offset = self.selected_idx - visible_lines + 1
             elif key in (curses.KEY_PPAGE, 2):  # Page Up / Ctrl-B
-                visible_lines = usable_height - 5
+                visible_lines = self.get_current_visible_lines(usable_height)
                 self.selected_idx = max(0, self.selected_idx - visible_lines)
                 self.scroll_offset = max(0, self.scroll_offset - visible_lines)
             elif key in (curses.KEY_NPAGE, 6):  # Page Down / Ctrl-F
-                visible_lines = usable_height - 5
+                visible_lines = self.get_current_visible_lines(usable_height)
                 self.selected_idx = min(list_size - 1, self.selected_idx + visible_lines)
                 self.scroll_offset = min(self.scroll_offset + visible_lines, max(0, list_size - visible_lines))
             elif key in (curses.KEY_HOME, ord('g')):
@@ -2369,7 +2374,7 @@ Actions:
                 self.scroll_offset = 0
             elif key in (curses.KEY_END, ord('G')):
                 self.selected_idx = list_size - 1
-                visible_lines = usable_height - 5
+                visible_lines = self.get_current_visible_lines(usable_height)
                 self.scroll_offset = max(0, list_size - visible_lines)
 
             # Enter / Right arrow / l key - drill down or expand collapse
