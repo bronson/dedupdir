@@ -808,14 +808,17 @@ class DedupdirTUI:
             win.refresh()
             return
 
-        # Column headers
+        # Column headers - right side headers shown if space permits
         header_line = 1
         try:
             win.addstr(header_line, 1, " %Dup", curses.A_BOLD | curses.A_UNDERLINE)
             win.addstr(header_line, 8, "Dup", curses.A_BOLD | curses.A_UNDERLINE)
             win.addstr(header_line, 13, "Total", curses.A_BOLD | curses.A_UNDERLINE)
-            win.addstr(header_line, 20, "MTime", curses.A_BOLD | curses.A_UNDERLINE)
-            win.addstr(header_line, 28, "Directory Path", curses.A_BOLD | curses.A_UNDERLINE)
+            win.addstr(header_line, 20, "Directory Path", curses.A_BOLD | curses.A_UNDERLINE)
+            # Right-aligned headers
+            if width > 60:
+                right_header = "Size  MTime"
+                win.addstr(header_line, width - len(right_header) - 2, right_header, curses.A_BOLD | curses.A_UNDERLINE)
         except curses.error:
             pass
 
@@ -834,17 +837,44 @@ class DedupdirTUI:
                 score = calculate_redundancy_score(duplicates, total)
                 path_str = self.get_path_with_root(dir_path)
                 mtime_str = self.format_mtime(dir_path)
+                dir_size = self.get_dir_size(dir_path)
+
+                # Format size
+                if dir_size < 1024:
+                    size_str = f"{dir_size}B"
+                elif dir_size < 1024 * 1024:
+                    size_str = f"{dir_size/1024:.1f}K"
+                elif dir_size < 1024 * 1024 * 1024:
+                    size_str = f"{dir_size/(1024*1024):.1f}M"
+                else:
+                    size_str = f"{dir_size/(1024*1024*1024):.1f}G"
 
                 # Format columns
                 percent_col = f"{score:6.1%}" if score > 0 else "   0% "
                 dup_col = f"{duplicates:4d}"
                 total_col = f"{total:5d}"
 
-                # Indent child directories by 2 spaces
-                if is_child:
-                    line = f"  {percent_col} {dup_col}  {total_col}  {mtime_str}  {path_str}"
+                # Left part: stats and path
+                indent = "  " if is_child else ""
+                left_part = f"{indent}{percent_col} {dup_col}  {total_col}  {path_str}"
+
+                # Right part: size and mtime
+                right_part = f"{size_str:>6s}  {mtime_str}"
+
+                # Calculate available space
+                max_len = width - 3
+                right_len = len(right_part) + 2  # +2 for spacing
+
+                if len(left_part) + right_len <= max_len:
+                    # Enough space for both - pad middle with spaces
+                    padding = max_len - len(left_part) - len(right_part)
+                    line = left_part + " " * padding + right_part
+                elif len(left_part) <= max_len:
+                    # Not enough for right part, just show left (truncate if needed)
+                    line = left_part[:max_len]
                 else:
-                    line = f"{percent_col} {dup_col}  {total_col}  {mtime_str}  {path_str}"
+                    # Truncate left part
+                    line = left_part[:max_len-3] + "..."
 
             elif item[0] == 'collapse':
                 # Collapse line
@@ -871,10 +901,11 @@ class DedupdirTUI:
                 else:
                     line = f"       ▶  {num_dirs} {dir_word}, {total_files} {file_word}, {size_str}"
 
-            # Truncate if too long
-            max_len = width - 3
-            if len(line) > max_len:
-                line = line[:max_len-3] + "..."
+            # For collapse lines, truncate if too long
+            if item[0] == 'collapse':
+                max_len = width - 3
+                if len(line) > max_len:
+                    line = line[:max_len-3] + "..."
 
             y = i + 2  # Start after header
             attr = curses.A_REVERSE if idx == selected_idx else curses.A_NORMAL
@@ -905,9 +936,11 @@ class DedupdirTUI:
         try:
             win.addstr(2, 1, f"Files in Directory ({len(files)}):", curses.A_BOLD)
             win.addstr(3, 1, " Copies", curses.A_BOLD | curses.A_UNDERLINE)
-            win.addstr(3, 12, "Size", curses.A_BOLD | curses.A_UNDERLINE)
-            win.addstr(3, 18, "MTime", curses.A_BOLD | curses.A_UNDERLINE)
-            win.addstr(3, 25, "Filename", curses.A_BOLD | curses.A_UNDERLINE)
+            win.addstr(3, 10, "Filename", curses.A_BOLD | curses.A_UNDERLINE)
+            # Right-aligned headers
+            if width > 50:
+                right_header = "Size  MTime"
+                win.addstr(3, width - len(right_header) - 2, right_header, curses.A_BOLD | curses.A_UNDERLINE)
         except curses.error:
             pass
 
@@ -945,11 +978,26 @@ class DedupdirTUI:
 
             mtime_str = self.format_mtime(file_path)
 
-            line = f"{count_col}  {size_str:>8s}  {mtime_str}  {filename}"
+            # Left part: count and filename
+            left_part = f"{count_col}  {filename}"
 
+            # Right part: size and mtime
+            right_part = f"{size_str:>6s}  {mtime_str}"
+
+            # Calculate available space
             max_len = width - 3
-            if len(line) > max_len:
-                line = line[:max_len-3] + "..."
+            right_len = len(right_part) + 2  # +2 for spacing
+
+            if len(left_part) + right_len <= max_len:
+                # Enough space for both - pad middle with spaces
+                padding = max_len - len(left_part) - len(right_part)
+                line = left_part + " " * padding + right_part
+            elif len(left_part) <= max_len:
+                # Not enough for right part, just show left
+                line = left_part[:max_len]
+            else:
+                # Truncate left part
+                line = left_part[:max_len-3] + "..."
 
             y = i + 4  # Start after headers
             attr = curses.A_REVERSE if idx == selected_idx else curses.A_NORMAL
