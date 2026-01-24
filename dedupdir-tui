@@ -808,13 +808,16 @@ class DedupdirTUI:
             win.refresh()
             return
 
-        # Column headers - right side headers shown if space permits
+        # Column headers with full-width underline
         header_line = 1
         try:
+            # Draw full-width underline first
+            win.addstr(header_line, 1, " " * (width - 2), curses.A_UNDERLINE)
+            # Then draw headers on top
             win.addstr(header_line, 1, " %Dup", curses.A_BOLD | curses.A_UNDERLINE)
-            win.addstr(header_line, 8, "Dup", curses.A_BOLD | curses.A_UNDERLINE)
-            win.addstr(header_line, 13, "Total", curses.A_BOLD | curses.A_UNDERLINE)
-            win.addstr(header_line, 20, "Directory Path", curses.A_BOLD | curses.A_UNDERLINE)
+            win.addstr(header_line, 8, "#Dup", curses.A_BOLD | curses.A_UNDERLINE)
+            win.addstr(header_line, 14, "Total", curses.A_BOLD | curses.A_UNDERLINE)
+            win.addstr(header_line, 21, "Directory Path", curses.A_BOLD | curses.A_UNDERLINE)
             # Right-aligned headers
             if width > 60:
                 right_header = "Size  MTime"
@@ -849,14 +852,14 @@ class DedupdirTUI:
                 else:
                     size_str = f"{dir_size/(1024*1024*1024):.1f}G"
 
-                # Format columns
+                # Format columns - stats always aligned, only path is indented
                 percent_col = f"{score:6.1%}" if score > 0 else "   0% "
-                dup_col = f"{duplicates:4d}"
+                dup_col = f"{duplicates:5d}"
                 total_col = f"{total:5d}"
 
-                # Left part: stats and path
+                # Left part: stats always aligned, path indented for children
                 indent = "  " if is_child else ""
-                left_part = f"{indent}{percent_col} {dup_col}  {total_col}  {path_str}"
+                left_part = f"{percent_col} {dup_col}  {total_col}  {indent}{path_str}"
 
                 # Right part: size and mtime
                 right_part = f"{size_str:>6s}  {mtime_str}"
