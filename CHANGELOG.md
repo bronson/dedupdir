@@ -3,6 +3,7 @@
 ## [0.2.XX] - 2026-XX
 * convert the two-pane UI back to single-pane
 * simplify the file view pane
+* confirm quitting unless you're at the top level
 
 ## [0.1.0] - 2026-01-21
 * rename project from redundir to dedupdir

@@ -93,6 +93,7 @@ class DedupdirTUI:
         self.trash_offset = 0
         self.confirm_trash_item = None  # Item pending confirmation
         self.confirm_trash_type = None  # 'file' or 'directory'
+        self.confirm_quit = False  # Whether quit confirmation is pending
         self.show_no_duplicates_message = False  # Show message when no duplicates found
 
         # Data will be populated by scan()
@@ -1318,7 +1319,7 @@ Actions:
         except curses.error:
             pass  # Ignore errors at edge of screen
 
-    def draw_confirmation_dialog(self, stdscr, message):
+    def draw_confirmation_dialog(self, stdscr, message, prompt="Confirm? (y/n)"):
         """Draw a confirmation dialog in the center of the screen."""
         height, width = stdscr.getmaxyx()
 
@@ -1355,7 +1356,6 @@ Actions:
             dialog.addstr(1 + i, 2, line, curses.A_BOLD)
 
         # Draw prompt
-        prompt = "Trash anyway? (y/n)"
         dialog.addstr(dialog_height - 2, (dialog_width - len(prompt)) // 2, prompt, curses.A_REVERSE)
 
         dialog.refresh()
@@ -1633,6 +1633,13 @@ Actions:
                 self.draw_trash_pane(trash_win, trash_height, trash_width)
                 self.draw_hint_bar(stdscr, 'trash')
 
+            elif self.confirm_quit:
+                # Draw quit confirmation dialog
+                self.draw_all_panes(usable_height, width)
+                message = "You have drilled down into the directory tree.\n\nAre you sure you want to quit?"
+                self.draw_confirmation_dialog(stdscr, message, "Quit? (y/n)")
+                self.draw_hint_bar(stdscr, 'confirm')
+
             elif self.confirm_trash_item is not None:
                 # Draw confirmation dialog - draw all panes then overlay the dialog
                 self.draw_all_panes(usable_height, width)
@@ -1640,7 +1647,7 @@ Actions:
                 # Draw confirmation dialog on top of all panes
                 rel_path = self.get_path_with_root(self.confirm_trash_item)
                 message = f"There is only one copy of\n\n{rel_path}\n\nIf you trash it, you will lose data."
-                self.draw_confirmation_dialog(stdscr, message)
+                self.draw_confirmation_dialog(stdscr, message, "Trash anyway? (y/n)")
                 self.draw_hint_bar(stdscr, 'confirm')
 
             else:
@@ -1659,7 +1666,20 @@ Actions:
                 stdscr.refresh()
                 continue
 
-            # Handle confirmation dialog first (takes priority)
+            # Handle quit confirmation first (takes priority)
+            if self.confirm_quit:
+                if key in (ord('y'), ord('Y')):
+                    break
+                elif key in (ord('n'), ord('N'), 27):  # n, N, or ESC
+                    self.confirm_quit = False
+                    continue
+                elif key == ord('?'):
+                    self.show_help_viewer(stdscr, 'confirm')
+                    continue
+                else:
+                    continue
+
+            # Handle trash confirmation dialog
             if self.confirm_trash_item is not None:
                 if key in (ord('q'), ord('Q')):
                     break
@@ -1730,9 +1750,12 @@ Actions:
             view = self.get_current_view()
             list_size = self.get_current_list_size()
 
-            # Q key - quit
+            # Q key - quit (with confirmation if not at top level)
             if key in (ord('q'), ord('Q')):
-                break
+                if len(self.view_stack) > 1:
+                    self.confirm_quit = True
+                else:
+                    break
 
             # ESC / Left arrow - go back
             elif key in (27, curses.KEY_LEFT, ord('h')):
