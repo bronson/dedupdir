@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
 dedupdir-tui - Interactive TUI for exploring redundant directories
+version 0.2.XX
 
-This provides a split-pane interface for browsing duplicate files:
-- Top pane: List of directories with redundancy scores
-- Bottom pane: Related directories and duplicate files for selected directory
+This script provides a TUI to help quickly deduplicate files. It shows the
+redundancies scores for all directories in a tree and lets you temporarily
+remove files and immediately see the effect on the scores.
 """
 
 import curses
@@ -75,17 +76,15 @@ class DedupdirTUI:
         self.root_paths = [Path(p).resolve() for p in root_paths]
         self.algorithm = algorithm
         self.jobs = jobs
+
+        # Navigation state
         self.selected_idx = 0
-        self.top_offset = 0
-        self.bottom_offset = 0
-        self.bottom_selected_idx = 0
-        self.active_pane = 'top'  # 'top' or 'bottom'
-        self.last_bottom_dir_idx = None  # Track which directory's details we're showing
-        self.show_quit_message = False  # Show "press q to quit" message
-        self.navigation_stack = []  # Stack of directory indices for back navigation
-        self.selected_file = None  # Currently selected file for filtering top pane
-        self.current_filtered_dirs = []  # Filtered directory list when a file is selected
-        self.current_bottom_dir = None  # The directory whose files are shown in bottom pane (doesn't change when navigating within bottom pane)
+        self.scroll_offset = 0
+        self.show_quit_message = False
+
+        # View stack for drill-down navigation
+        # Each entry is a dict: {'type': 'main'|'dir_detail'|'file_detail', 'data': {...}}
+        self.view_stack = [{'type': 'main'}]
 
         # Trash system (trash dirs are per-root, not in cwd)
         self.trash_stack = []  # Stack for undo: [(original_path, trash_path, is_dir), ...]
@@ -137,6 +136,19 @@ class DedupdirTUI:
             key=lambda x: (-calculate_redundancy_score(x[1][0], x[1][1]), str(x[0]))
         )
 
+    def get_path_with_root(self, path):
+        """Get path including root prefix (e.g., 'pix/subdir/file.jpg')."""
+        path = Path(path)
+        # Find which root this path belongs to
+        for root in self.root_paths:
+            try:
+                rel = path.relative_to(root.parent)
+                return str(rel)
+            except ValueError:
+                continue
+        # Fallback to just the path
+        return str(path)
+
     def get_relative_path(self, path):
         """Convert absolute path to relative display path."""
         # Try each root path
@@ -151,23 +163,28 @@ class DedupdirTUI:
         return str(path)
 
     def get_related_dirs(self, dir_path):
-        """Get related directories and their hypothetical redundancy scores."""
+        """Get related directories and their hypothetical redundancy scores.
+
+        Returns list of (related_dir_path, shared_files, duplicates, total_files) tuples.
+        """
         # Find all hashes in this directory
         dir_hashes = set()
         for fpath in self.dir_all_files.get(dir_path, []):
             if fpath in self.file_to_hash:
                 dir_hashes.add(self.file_to_hash[fpath])
 
-        # Find related directories
-        related_dirs = set()
+        # Find related directories and count shared files
+        related_dirs_info = {}
         for h in dir_hashes:
             for d in self.hash_to_dirs[h]:
                 if d != dir_path:
-                    related_dirs.add(d)
+                    if d not in related_dirs_info:
+                        related_dirs_info[d] = 0
+                    related_dirs_info[d] += 1  # Count shared files
 
-        # Calculate hypothetical redundancy
+        # Calculate hypothetical redundancy for each related directory
         related_info = []
-        for related_dir in related_dirs:
+        for related_dir, shared_count in related_dirs_info.items():
             related_files = self.dir_all_files.get(related_dir, [])
             total_related = len(related_files)
 
@@ -179,12 +196,10 @@ class DedupdirTUI:
                     if len(other_dirs) > 0:
                         hypothetical_duplicates += 1
 
-            hyp_score = calculate_redundancy_score(hypothetical_duplicates, total_related)
-            rel_display = self.get_relative_path(related_dir)
-            related_info.append((hyp_score, hypothetical_duplicates, total_related, rel_display))
+            related_info.append((related_dir, shared_count, hypothetical_duplicates, total_related))
 
-        # Sort by hypothetical redundancy score
-        related_info.sort(key=lambda x: (-x[0], str(x[3])))
+        # Sort by shared files descending, then by hypothetical duplicates descending
+        related_info.sort(key=lambda x: (-x[1], -x[2]))
         return related_info
 
     def get_duplicate_files(self, dir_path):
@@ -286,6 +301,40 @@ class DedupdirTUI:
         items.sort(key=lambda x: x['timestamp'], reverse=True)
         return items
 
+    def get_current_view(self):
+        """Get the current view from the view stack."""
+        return self.view_stack[-1] if self.view_stack else {'type': 'main'}
+
+    def push_view(self, view):
+        """Push a new view onto the stack."""
+        self.view_stack.append(view)
+        self.selected_idx = 0
+        self.scroll_offset = 0
+
+    def pop_view(self):
+        """Pop the current view and return to the previous one."""
+        if len(self.view_stack) > 1:
+            self.view_stack.pop()
+            self.selected_idx = 0
+            self.scroll_offset = 0
+            return True
+        return False
+
+    def get_current_list_size(self):
+        """Get the size of the current list being displayed."""
+        view = self.get_current_view()
+        if view['type'] == 'main':
+            return len(self.sorted_dirs)
+        elif view['type'] == 'dir_detail':
+            dir_path = view['data']['dir_path']
+            related_dirs = self.get_related_dirs(dir_path)
+            files = self.get_all_files_with_counts(dir_path)
+            return len(related_dirs) + len(files)
+        elif view['type'] == 'file_detail':
+            file_path = view['data']['file_path']
+            return len(self.get_dirs_containing_file(file_path))
+        return 0
+
     def get_current_stats(self):
         """Calculate current statistics: total files, duplicate files, and duplication percentage.
 
@@ -379,34 +428,7 @@ class DedupdirTUI:
 
         # Update data structures
         if item_type == 'file':
-            # If we're trashing the selected file, we need to update the selection
-            # to point to another copy (if any exist) or clear it
-            if self.selected_file == item_path:
-                # Get the hash before we remove the file
-                file_hash = self.file_to_hash.get(item_path)
-
-                # Remove the file
-                self.remove_file_from_data(item_path)
-
-                # Try to find another file with the same hash
-                if file_hash and file_hash in self.hash_to_dirs:
-                    # Find any remaining file with this hash
-                    for remaining_dir in self.hash_to_dirs[file_hash]:
-                        for remaining_file in self.dir_all_files.get(remaining_dir, []):
-                            if remaining_file in self.file_to_hash and self.file_to_hash[remaining_file] == file_hash:
-                                # Found a replacement - update selected_file
-                                self.selected_file = remaining_file
-                                break
-                        if self.selected_file != item_path:
-                            break
-                    else:
-                        # No remaining copies found, clear the filter
-                        self.selected_file = None
-                else:
-                    # No hash or no remaining directories, clear the filter
-                    self.selected_file = None
-            else:
-                self.remove_file_from_data(item_path)
+            self.remove_file_from_data(item_path)
         else:  # directory
             self.remove_directory_from_data(item_path)
 
@@ -557,21 +579,32 @@ class DedupdirTUI:
                 # Can't remove or access, stop
                 break
 
-    def draw_top_pane(self, win, height, width):
-        """Draw the directory list in the top pane."""
-        win.clear()
+    def format_mtime(self, path):
+        """Format modification time compactly."""
+        try:
+            mtime = path.stat().st_mtime
+            dt = datetime.fromtimestamp(mtime)
+            now = datetime.now()
 
-        # Border with highlight if active
-        if self.active_pane == 'top':
-            win.attron(curses.A_BOLD)
+            # If today, show time
+            if dt.date() == now.date():
+                return dt.strftime("%H:%M")
+            # If this year, show month-day
+            elif dt.year == now.year:
+                return dt.strftime("%m-%d")
+            # Otherwise show year
+            else:
+                return dt.strftime("%Y")
+        except:
+            return "-----"
+
+    def draw_main_view(self, win, height, width):
+        """Draw the main directory list view."""
+        win.clear()
         win.border()
-        if self.active_pane == 'top':
-            win.attroff(curses.A_BOLD)
 
         # Show statistics in upper right corner
         total_files, duplicate_files, duplication_percent = self.get_current_stats()
-
-        # Format the percentage carefully
         if duplication_percent == 0.0:
             percent_str = "0%"
         elif duplication_percent < 0.01:
@@ -585,28 +618,17 @@ class DedupdirTUI:
 
         stats_text = f" {total_files} files | {duplicate_files} dupes | {percent_str} "
         stats_x = width - len(stats_text) - 1
-        if stats_x > 2:  # Only show if there's room
+        if stats_x > 2:
             try:
                 win.addstr(0, stats_x, stats_text, curses.A_DIM)
             except curses.error:
                 pass
 
-        # Determine which directories to show (filter if a file is selected)
-        if self.selected_file:
-            # Show only directories containing the selected file
-            dirs_to_show = self.get_dirs_containing_file(self.selected_file)
-            filtered_dirs = [(dp, stats) for dp, stats in self.sorted_dirs if dp in dirs_to_show]
-            title = f" Directories containing {self.selected_file.name} ({len(filtered_dirs)}) "
-        else:
-            # Show all directories with redundancy
-            filtered_dirs = self.sorted_dirs
-            title = f" All Directories ({len(filtered_dirs)}) "
-
-        # Store filtered dirs for navigation
-        self.current_filtered_dirs = filtered_dirs
-
-        title_attr = curses.A_BOLD | curses.A_REVERSE if self.active_pane == 'top' else curses.A_BOLD
-        win.addstr(0, 2, title[:width-4], title_attr)
+        title = f" All Directories ({len(self.sorted_dirs)}) "
+        try:
+            win.addstr(0, 2, title[:width-4], curses.A_BOLD)
+        except curses.error:
+            pass
 
         # Show quit message if needed
         if self.show_quit_message:
@@ -616,202 +638,250 @@ class DedupdirTUI:
             except curses.error:
                 pass
 
-        if not filtered_dirs:
-            win.addstr(1, 1, "No directories to display")
+        if not self.sorted_dirs:
+            win.addstr(2, 1, "No directories to display")
             win.refresh()
             return
 
-        # Calculate column width for count
-        max_count_width = max(
-            len(f"{dup}/{total}")
-            for _, (dup, total) in filtered_dirs
-        ) if filtered_dirs else 3
+        # Column headers
+        header_line = 1
+        try:
+            win.addstr(header_line, 1, " %Dup", curses.A_BOLD | curses.A_UNDERLINE)
+            win.addstr(header_line, 8, "Dup", curses.A_BOLD | curses.A_UNDERLINE)
+            win.addstr(header_line, 13, "Total", curses.A_BOLD | curses.A_UNDERLINE)
+            win.addstr(header_line, 20, "MTime", curses.A_BOLD | curses.A_UNDERLINE)
+            win.addstr(header_line, 28, "Directory Path", curses.A_BOLD | curses.A_UNDERLINE)
+        except curses.error:
+            pass
 
         # Display directories
-        display_height = height - 2
+        display_height = height - 3  # Account for border, header, and bottom border
         for i in range(display_height):
-            idx = self.top_offset + i
-            if idx >= len(filtered_dirs):
+            idx = self.scroll_offset + i
+            if idx >= len(self.sorted_dirs):
                 break
 
-            dir_path, (duplicates, total) = filtered_dirs[idx]
+            dir_path, (duplicates, total) = self.sorted_dirs[idx]
             score = calculate_redundancy_score(duplicates, total)
-            rel_path = self.get_relative_path(dir_path)
+            path_str = self.get_path_with_root(dir_path)
+            mtime_str = self.format_mtime(dir_path)
 
-            # Format line - include filename if filtering by file
-            if self.selected_file:
-                # Show directory/filename when filtering
-                # Get the actual filename in this directory (may differ from selected file's name)
-                actual_filename = self.get_filename_in_dir(self.selected_file, dir_path)
+            # Format columns
+            percent_col = f"{score:6.1%}" if score > 0 else "   0% "
+            dup_col = f"{duplicates:4d}"
+            total_col = f"{total:5d}"
 
-                # Get file-specific stats: how many directories contain this file
-                file_hash = self.file_to_hash.get(self.selected_file)
-                if file_hash:
-                    num_dirs_with_file = len(self.hash_to_dirs.get(file_hash, set()))
-                    # Calculate redundancy: redundant copies / total copies
-                    # (if file appears in 3 dirs, 2 are redundant copies, 1 is "original")
-                    redundant_copies = max(0, num_dirs_with_file - 1)
-                    file_score = calculate_redundancy_score(redundant_copies, num_dirs_with_file)
-                    percent_str = f"{file_score:7.2%}"
-                    count_str = f"{redundant_copies}/{num_dirs_with_file}".rjust(max_count_width)
-                else:
-                    percent_str = "  0.00%"
-                    count_str = "0/1".rjust(max_count_width)
-
-                line = f"{percent_str}  {count_str}  {rel_path}/{actual_filename}"
-            else:
-                # Show directory stats when not filtering
-                percent_str = f"{score:7.2%}"
-                count_str = f"{duplicates}/{total}".rjust(max_count_width)
-                line = f"{percent_str}  {count_str}  {rel_path}"
+            line = f"{percent_col} {dup_col}  {total_col}  {mtime_str}  {path_str}"
 
             # Truncate if too long
             max_len = width - 3
             if len(line) > max_len:
                 line = line[:max_len-3] + "..."
 
-            y = i + 1
-            if idx == self.selected_idx:
-                if self.active_pane == 'top':
-                    attr = curses.A_REVERSE
-                else:
-                    # Inactive pane - show selection as bright/bold and underlined
-                    attr = curses.A_BOLD | curses.A_UNDERLINE
-            else:
-                attr = curses.A_NORMAL
-            win.addstr(y, 1, line.ljust(width - 2), attr)
-
-        win.refresh()
-
-    def draw_bottom_pane(self, win, height, width):
-        """Draw the details for selected directory in the bottom pane."""
-        win.clear()
-
-        # Border with highlight if active
-        if self.active_pane == 'bottom':
-            win.attron(curses.A_BOLD)
-        win.border()
-        if self.active_pane == 'bottom':
-            win.attroff(curses.A_BOLD)
-
-        if not self.sorted_dirs:
-            win.addstr(1, 1, "No duplicate files found.")
-            win.refresh()
-            return
-
-        # Use current_bottom_dir if set, otherwise use selected directory from sorted_dirs
-        if self.current_bottom_dir is not None:
-            dir_path = self.current_bottom_dir
-            # Find the stats for this directory
-            duplicates, total = 0, 0
-            for dp, (d, t) in self.sorted_dirs:
-                if dp == dir_path:
-                    duplicates, total = d, t
-                    break
-        else:
-            dir_path, (duplicates, total) = self.sorted_dirs[self.selected_idx]
-        rel_path = self.get_relative_path(dir_path)
-
-        # Title
-        title = f" Files in: {rel_path} "
-        if len(title) > width - 4:
-            title = " " + title[-(width-5):] + " "
-        title_attr = curses.A_BOLD | curses.A_REVERSE if self.active_pane == 'bottom' else curses.A_BOLD
-        win.addstr(0, 2, title, title_attr)
-
-        # Get related directories and all files with counts
-        related_dirs = self.get_related_dirs(dir_path)
-        all_files = self.get_all_files_with_counts(dir_path)
-
-        # Calculate max count width for alignment
-        max_count_width = 3
-        if related_dirs:
-            max_count_width = max(max_count_width, max(
-                len(f"{dup}/{total}")
-                for _, dup, total, _ in related_dirs
-            ))
-        if all_files:
-            max_file_count_width = max(len(str(count)) for _, count, _ in all_files)
-            max_count_width = max(max_count_width, max_file_count_width)
-
-        lines = []
-        selectable_indices = []  # Track which line indices are selectable
-        line_to_dir = {}  # Map line index to directory index for related directories
-        line_to_file = {}  # Map line index to file path
-
-        # Related directories section
-        if related_dirs:
-            lines.append(("Related directories (if this dir didn't exist):", curses.A_BOLD))
-            for hyp_score, hyp_dup, hyp_total, rel_display in related_dirs:
-                percent_str = f"{hyp_score:7.2%}"
-                count_str = f"{hyp_dup}/{hyp_total}".rjust(max_count_width)
-                line = f"  {percent_str}  {count_str}  {rel_display}"
-                line_idx = len(lines)
-                selectable_indices.append(line_idx)
-                # Store the actual directory path for this line
-                for idx, (dp, _) in enumerate(self.sorted_dirs):
-                    if self.get_relative_path(dp) == rel_display:
-                        line_to_dir[line_idx] = idx
-                        break
-                lines.append((line, curses.A_NORMAL))
-            lines.append(("", curses.A_NORMAL))
-
-        # Files section - show all files with directory count
-        if all_files:
-            lines.append((f"Files ({len(all_files)}):", curses.A_BOLD))
-            for fname, dir_count, fpath in all_files:
-                line_idx = len(lines)
-                selectable_indices.append(line_idx)
-                line_to_file[line_idx] = fpath
-                # Format: count right-justified, then filename
-                count_str = str(dir_count).rjust(max_count_width)
-                line = f"  {count_str}  {fname}"
-                lines.append((line, curses.A_NORMAL))
-
-        # Display with scrolling
-        display_height = height - 2
-        for i in range(display_height):
-            idx = self.bottom_offset + i
-            if idx >= len(lines):
-                break
-
-            line, attr = lines[idx]
-            y = i + 1
-
-            # Truncate if too long
-            max_len = width - 3
-            if len(line) > max_len:
-                line = line[:max_len-3] + "..."
-
-            # Highlight selected line
-            if idx == self.bottom_selected_idx:
-                if self.active_pane == 'bottom':
-                    attr = curses.A_REVERSE
-                else:
-                    # Inactive pane - show selection as bright/bold and underlined
-                    attr = curses.A_BOLD | curses.A_UNDERLINE
-
+            y = i + 2  # Start after header
+            attr = curses.A_REVERSE if idx == self.selected_idx else curses.A_NORMAL
             try:
-                win.addstr(y, 1, line, attr)
-            except curses.error:
-                pass  # Ignore errors from writing to last line
-
-        # Scrollbar indicator
-        if len(lines) > display_height:
-            indicator = f" [{self.bottom_offset + 1}-{min(self.bottom_offset + display_height, len(lines))}/{len(lines)}] "
-            try:
-                win.addstr(height - 1, width - len(indicator) - 1, indicator, curses.A_DIM)
+                win.addstr(y, 1, line.ljust(width - 2), attr)
             except curses.error:
                 pass
 
         win.refresh()
 
-        # Store lines count and selectable indices for navigation
-        self.bottom_lines_count = len(lines)
-        self.bottom_selectable_indices = selectable_indices
-        self.bottom_line_to_dir = line_to_dir
-        self.bottom_line_to_file = line_to_file
+    def draw_dir_detail_view(self, win, height, width):
+        """Draw directory detail view showing related directories and files."""
+        view = self.get_current_view()
+        dir_path = view['data']['dir_path']
 
+        win.clear()
+        win.border()
+
+        title = f" Directory: {self.get_path_with_root(dir_path)} "
+        try:
+            win.addstr(0, 2, title[:width-4], curses.A_BOLD)
+        except curses.error:
+            pass
+
+        # Get related directories and files
+        related_dirs = self.get_related_dirs(dir_path)
+        files = self.get_all_files_with_counts(dir_path)
+
+        # Calculate split: 40% for related dirs, 60% for files (minimum 5 lines each)
+        total_lines = height - 3
+        related_lines = max(5, min(len(related_dirs) + 2, int(total_lines * 0.4)))
+        file_lines = total_lines - related_lines
+
+        current_line = 1
+
+        # Draw related directories section
+        try:
+            win.addstr(current_line, 1, f"Related Directories ({len(related_dirs)}):", curses.A_BOLD)
+            current_line += 1
+
+            if related_dirs:
+                # Headers
+                win.addstr(current_line, 1, " Shared", curses.A_BOLD | curses.A_UNDERLINE)
+                win.addstr(current_line, 10, "%Dup", curses.A_BOLD | curses.A_UNDERLINE)
+                win.addstr(current_line, 17, "Dup", curses.A_BOLD | curses.A_UNDERLINE)
+                win.addstr(current_line, 22, "Total", curses.A_BOLD | curses.A_UNDERLINE)
+                win.addstr(current_line, 29, "Path", curses.A_BOLD | curses.A_UNDERLINE)
+                current_line += 1
+
+                # Calculate which items are in "related dirs" section (top of list)
+                related_end_idx = len(related_dirs)
+
+                # Calculate starting index for this section
+                if self.selected_idx < len(related_dirs):
+                    # Selected is in related dirs - show from scroll_offset
+                    start_idx = self.scroll_offset
+                else:
+                    # Selected is in files - show all related dirs if they fit
+                    start_idx = 0
+
+                for i in range(related_lines - 3):
+                    idx = start_idx + i
+                    if idx >= len(related_dirs):
+                        break
+
+                    rel_dir, shared, dups, total = related_dirs[idx]
+                    score = calculate_redundancy_score(dups, total)
+                    path_str = self.get_path_with_root(rel_dir)
+
+                    shared_col = f"{shared:5d}"
+                    percent_col = f"{score:5.1%}" if score > 0 else "  0% "
+                    dup_col = f"{dups:3d}"
+                    total_col = f"{total:5d}"
+
+                    line = f"{shared_col}  {percent_col} {dup_col}  {total_col}  {path_str}"
+                    max_len = width - 3
+                    if len(line) > max_len:
+                        line = line[:max_len-3] + "..."
+
+                    attr = curses.A_REVERSE if idx == self.selected_idx else curses.A_NORMAL
+                    win.addstr(current_line, 1, line.ljust(width - 2), attr)
+                    current_line += 1
+            else:
+                current_line += 1
+                win.addstr(current_line, 1, "  (No related directories)")
+                current_line += 1
+        except curses.error:
+            pass
+
+        # Draw separator
+        current_line = related_lines + 1
+        try:
+            win.addstr(current_line, 0, "├" + "─" * (width - 2) + "┤")
+            current_line += 1
+        except curses.error:
+            pass
+
+        # Draw files section
+        try:
+            win.addstr(current_line, 1, f"Files in Directory ({len(files)}):", curses.A_BOLD)
+            current_line += 1
+
+            if files:
+                # Headers
+                win.addstr(current_line, 1, " Copies", curses.A_BOLD | curses.A_UNDERLINE)
+                win.addstr(current_line, 10, "Filename", curses.A_BOLD | curses.A_UNDERLINE)
+                current_line += 1
+
+                # Files start after related_dirs in the item list
+                file_start_idx = len(related_dirs)
+
+                # Calculate starting file index based on selection
+                if self.selected_idx >= len(related_dirs):
+                    # Selected is in files section
+                    file_scroll = max(0, self.scroll_offset - len(related_dirs))
+                else:
+                    # Selected is in related dirs - show from beginning of files
+                    file_scroll = 0
+
+                for i in range(file_lines - 3):
+                    file_idx = file_scroll + i
+                    if file_idx >= len(files):
+                        break
+
+                    filename, count, file_path = files[file_idx]
+                    count_col = f"{count:5d}"
+                    line = f"{count_col}   {filename}"
+
+                    max_len = width - 3
+                    if len(line) > max_len:
+                        line = line[:max_len-3] + "..."
+
+                    list_idx = file_start_idx + file_idx
+                    attr = curses.A_REVERSE if list_idx == self.selected_idx else curses.A_NORMAL
+                    win.addstr(current_line, 1, line.ljust(width - 2), attr)
+                    current_line += 1
+            else:
+                win.addstr(current_line, 1, "  (No files)")
+        except curses.error:
+            pass
+
+        win.refresh()
+
+    def draw_file_detail_view(self, win, height, width):
+        """Draw file detail view showing all directories containing this file."""
+        view = self.get_current_view()
+        file_path = view['data']['file_path']
+
+        win.clear()
+        win.border()
+
+        title = f" File: {file_path.name} "
+        try:
+            win.addstr(0, 2, title[:width-4], curses.A_BOLD)
+        except curses.error:
+            pass
+
+        # Get all directories containing this file
+        dirs_with_file = self.get_dirs_containing_file(file_path)
+
+        # Headers
+        try:
+            win.addstr(2, 1, f"Directories Containing This File ({len(dirs_with_file)}):", curses.A_BOLD)
+            win.addstr(3, 1, " %Dup", curses.A_BOLD | curses.A_UNDERLINE)
+            win.addstr(3, 8, "Dup", curses.A_BOLD | curses.A_UNDERLINE)
+            win.addstr(3, 13, "Total", curses.A_BOLD | curses.A_UNDERLINE)
+            win.addstr(3, 20, "MTime", curses.A_BOLD | curses.A_UNDERLINE)
+            win.addstr(3, 28, "Directory Path", curses.A_BOLD | curses.A_UNDERLINE)
+        except curses.error:
+            pass
+
+        # Display directories
+        display_height = height - 5
+        for i in range(display_height):
+            idx = self.scroll_offset + i
+            if idx >= len(dirs_with_file):
+                break
+
+            dir_path = dirs_with_file[idx]
+            if dir_path in self.dir_stats:
+                duplicates, total = self.dir_stats[dir_path]
+            else:
+                duplicates, total = 0, len(self.dir_all_files.get(dir_path, []))
+
+            score = calculate_redundancy_score(duplicates, total)
+            path_str = self.get_path_with_root(dir_path)
+            mtime_str = self.format_mtime(dir_path)
+
+            percent_col = f"{score:6.1%}" if score > 0 else "   0% "
+            dup_col = f"{duplicates:4d}"
+            total_col = f"{total:5d}"
+
+            line = f"{percent_col} {dup_col}  {total_col}  {mtime_str}  {path_str}"
+            max_len = width - 3
+            if len(line) > max_len:
+                line = line[:max_len-3] + "..."
+
+            y = i + 4
+            attr = curses.A_REVERSE if idx == self.selected_idx else curses.A_NORMAL
+            try:
+                win.addstr(y, 1, line.ljust(width - 2), attr)
+            except curses.error:
+                pass
+
+        win.refresh()
     def draw_trash_pane(self, win, height, width):
         """Draw the trash viewer in full screen."""
         win.clear()
@@ -1262,7 +1332,11 @@ Actions:
     def get_hint_text(self, mode):
         """Get hint bar text for the given mode."""
         if mode == 'main':
-            return "↑↓:Navigate  v:View  o:Open  t:Trash  T:View Trash"
+            return "↑↓:Navigate  Enter:Drill Down  t:Trash  T:View Trash  q:Quit"
+        elif mode == 'dir_detail':
+            return "↑↓:Navigate  Enter:Drill Down  v:View  o:Open  t:Trash  Esc:Back"
+        elif mode == 'file_detail':
+            return "↑↓:Navigate  Enter:Drill Down  v:View  o:Open  t:Trash  Esc:Back"
         elif mode == 'trash':
             return "↑↓:Navigate  v:View  o:Open  r:Restore  T:Back"
         elif mode == 'viewer':
@@ -1339,13 +1413,208 @@ Actions:
         dialog.refresh()
         return dialog
 
+    def handle_enter_key(self, view):
+        """Handle Enter key - drill down into directories or files."""
+        if view['type'] == 'main':
+            # Drilling into a directory from main view
+            if self.selected_idx < len(self.sorted_dirs):
+                dir_path, _ = self.sorted_dirs[self.selected_idx]
+                self.push_view({'type': 'dir_detail', 'data': {'dir_path': dir_path}})
+
+        elif view['type'] == 'dir_detail':
+            dir_path = view['data']['dir_path']
+            related_dirs = self.get_related_dirs(dir_path)
+            files = self.get_all_files_with_counts(dir_path)
+
+            # Check if selecting a related directory or a file
+            if self.selected_idx < len(related_dirs):
+                # Selected a related directory - drill into it
+                rel_dir, shared, dups, total = related_dirs[self.selected_idx]
+                self.push_view({'type': 'dir_detail', 'data': {'dir_path': rel_dir}})
+
+            if self.selected_idx < len(related_dirs):
+                # Trashing a related directory
+                rel_dir, _, _, _ = related_dirs[self.selected_idx]
+                item_to_trash = rel_dir
+                trash_type = 'directory'
+            elif self.selected_idx < len(related_dirs) + len(files):
+                # Selected a file - show file detail
+                file_idx = self.selected_idx - len(related_dirs)
+                filename, _, file_path = files[file_idx]
+                self.push_view({'type': 'file_detail', 'data': {'file_path': file_path}})
+
+        elif view['type'] == 'file_detail':
+            # Drilling into a directory from file detail view
+            file_path = view['data']['file_path']
+            dirs_with_file = self.get_dirs_containing_file(file_path)
+            if self.selected_idx < len(dirs_with_file):
+                dir_path = dirs_with_file[self.selected_idx]
+                self.push_view({'type': 'dir_detail', 'data': {'dir_path': dir_path}})
+
+    def handle_trash_key(self, view):
+        """Handle 't' key - trash selected item."""
+        item_to_trash = None
+        trash_type = None
+
+        if view['type'] == 'main':
+            # Trashing a directory from main view
+            if self.selected_idx < len(self.sorted_dirs):
+                dir_path, _ = self.sorted_dirs[self.selected_idx]
+                item_to_trash = dir_path
+                trash_type = 'directory'
+
+        elif view['type'] == 'dir_detail':
+            dir_path = view['data']['dir_path']
+            related_dirs = self.get_related_dirs(dir_path)
+            files = self.get_all_files_with_counts(dir_path)
+
+            if self.selected_idx < len(related_dirs):
+                # Trashing a related directory
+                rel_dir, _, _, _ = related_dirs[self.selected_idx]
+                item_to_trash = rel_dir
+                trash_type = 'directory'
+            elif self.selected_idx < len(related_dirs) + len(files):
+                # Trashing a file
+                file_idx = self.selected_idx - len(related_dirs)
+                _, _, file_path = files[file_idx]
+                item_to_trash = file_path
+                trash_type = 'file'
+
+        elif view['type'] == 'file_detail':
+            # Can't trash from file detail view (would be confusing which copy to trash)
+            # Could trash the selected directory instead
+            file_path = view['data']['file_path']
+            dirs_with_file = self.get_dirs_containing_file(file_path)
+            if self.selected_idx < len(dirs_with_file):
+                dir_path = dirs_with_file[self.selected_idx]
+                item_to_trash = dir_path
+                trash_type = 'directory'
+
+        if item_to_trash:
+            # Check if confirmation needed
+            needs_confirmation = False
+            num_roots = len(self.root_paths)
+
+            if trash_type == 'file':
+                count = self.get_file_redundancy_count(item_to_trash)
+                if count < num_roots:
+                    needs_confirmation = True
+            else:  # directory
+                if not self.is_dir_fully_redundant(item_to_trash):
+                    needs_confirmation = True
+
+            if needs_confirmation:
+                self.confirm_trash_item = item_to_trash
+                self.confirm_trash_type = trash_type
+            else:
+                # Trash immediately
+                self.trash_item(item_to_trash, trash_type)
+
+    def handle_view_key(self, view, stdscr, height, width):
+        """Handle 'v' key - view file content."""
+        file_path = None
+
+        if view['type'] == 'dir_detail':
+            dir_path = view['data']['dir_path']
+            related_dirs = self.get_related_dirs(dir_path)
+            files = self.get_all_files_with_counts(dir_path)
+
+            # Only works on files
+            if self.selected_idx >= len(related_dirs) and self.selected_idx < len(related_dirs) + len(files):
+                file_idx = self.selected_idx - len(related_dirs)
+                _, _, file_path = files[file_idx]
+
+        elif view['type'] == 'file_detail':
+            # View the file itself
+            file_path = view['data']['file_path']
+
+        if file_path and file_path.is_file():
+            # Get file content once before entering viewer loop
+            metadata_lines, content_lines, file_type = self.get_file_content_for_viewing(file_path)
+
+            # Enter file viewing mode
+            scroll_offset = 0
+            while True:
+                # Get current terminal dimensions
+                height, width = stdscr.getmaxyx()
+
+                # Redraw current view as background
+                usable_height = height - 1
+                main_win = curses.newwin(usable_height, width, 0, 0)
+                if view['type'] == 'main':
+                    self.draw_main_view(main_win, usable_height, width)
+                elif view['type'] == 'dir_detail':
+                    self.draw_dir_detail_view(main_win, usable_height, width)
+                elif view['type'] == 'file_detail':
+                    self.draw_file_detail_view(main_win, usable_height, width)
+
+                # Draw file viewer overlay on top
+                scroll_offset, total_lines = self.draw_file_viewer(stdscr, file_path, metadata_lines, content_lines, scroll_offset)
+
+                # Draw hint bar
+                self.draw_hint_bar(stdscr, 'viewer')
+
+                # Handle viewer input
+                view_key = stdscr.getch()
+
+                if view_key in (ord('q'), ord('Q'), 27):  # q, Q, or ESC
+                    break
+                elif view_key == curses.KEY_RESIZE:
+                    stdscr.clear()
+                    stdscr.refresh()
+                    continue
+                elif view_key == ord('?'):
+                    self.show_help_viewer(stdscr, 'viewer')
+                    continue
+                elif view_key in (curses.KEY_UP, ord('k')):
+                    scroll_offset = max(0, scroll_offset - 1)
+                elif view_key in (curses.KEY_DOWN, ord('j')):
+                    viewer_height = int(height * 0.85)
+                    visible_height = viewer_height - 2
+                    max_offset = max(0, total_lines - visible_height)
+                    scroll_offset = min(max_offset, scroll_offset + 1)
+                elif view_key in (curses.KEY_PPAGE, curses.KEY_NPAGE, 2, 6):  # PgUp/PgDn or Ctrl-B/Ctrl-F
+                    viewer_height = int(height * 0.85)
+                    visible_height = viewer_height - 2
+                    if view_key in (curses.KEY_PPAGE, 2):  # Page Up or Ctrl-B
+                        scroll_offset = max(0, scroll_offset - visible_height)
+                    else:  # Page Down or Ctrl-F
+                        max_offset = max(0, total_lines - visible_height)
+                        scroll_offset = min(max_offset, scroll_offset + visible_height)
+                elif view_key in (curses.KEY_HOME, ord('<')):
+                    scroll_offset = 0
+                elif view_key in (curses.KEY_END, ord('>')):
+                    viewer_height = int(height * 0.85)
+                    visible_height = viewer_height - 2
+                    scroll_offset = max(0, total_lines - visible_height)
+
+    def handle_open_key(self, view):
+        """Handle 'o' key - open file with system default application."""
+        file_path = None
+
+        if view['type'] == 'dir_detail':
+            dir_path = view['data']['dir_path']
+            related_dirs = self.get_related_dirs(dir_path)
+            files = self.get_all_files_with_counts(dir_path)
+
+            # Only works on files
+            if self.selected_idx >= len(related_dirs) and self.selected_idx < len(related_dirs) + len(files):
+                file_idx = self.selected_idx - len(related_dirs)
+                _, _, file_path = files[file_idx]
+
+        elif view['type'] == 'file_detail':
+            # Open the file itself
+            file_path = view['data']['file_path']
+
+        if file_path and file_path.is_file():
+            self.open_file_with_system_app(file_path)
+
     def run(self, stdscr):
         """Main TUI loop."""
         curses.curs_set(0)  # Hide cursor
         stdscr.clear()
 
         # Set escape delay to 25ms to make ESC key responsive
-        # (curses waits to see if ESC is part of an escape sequence)
         if hasattr(curses, 'set_escdelay'):
             curses.set_escdelay(25)
 
@@ -1359,8 +1628,7 @@ Actions:
         stdscr.refresh()
 
         if not self.sorted_dirs:
-            # No duplicates found - show trash viewer instead of exiting
-            # This allows user to restore files if they trashed too much
+            # No duplicates found - show trash viewer
             self.viewing_trash = True
             self.trash_selected_idx = 0
             self.trash_offset = 0
@@ -1371,19 +1639,15 @@ Actions:
         # Main loop
         while True:
             height, width = stdscr.getmaxyx()
+            usable_height = height - 1  # Reserve last line for hint bar
 
-            # Draw based on current mode
-            # Reserve last line for hint bar
-            usable_height = height - 1
-
+            # Handle different display modes
             if self.viewing_trash:
-                # Trash viewer mode - draw main screen first, then overlay
-                top_height = max(5, usable_height * 2 // 5)
-                bottom_height = usable_height - top_height
-                top_win = curses.newwin(top_height, width, 0, 0)
-                bottom_win = curses.newwin(bottom_height, width, top_height, 0)
-                self.draw_top_pane(top_win, top_height, width)
-                self.draw_bottom_pane(bottom_win, bottom_height, width)
+                # Draw trash viewer overlay
+                view = self.get_current_view()
+                if view['type'] == 'main':
+                    main_win = curses.newwin(usable_height, width, 0, 0)
+                    self.draw_main_view(main_win, usable_height, width)
 
                 # Draw trash viewer as centered overlay (85% width, 92% height)
                 trash_height = int(usable_height * 0.92)
@@ -1392,35 +1656,38 @@ Actions:
                 trash_x = (width - trash_width) // 2
                 trash_win = curses.newwin(trash_height, trash_width, trash_y, trash_x)
                 self.draw_trash_pane(trash_win, trash_height, trash_width)
-
-                # Draw hint bar
                 self.draw_hint_bar(stdscr, 'trash')
+
             elif self.confirm_trash_item is not None:
-                # Confirmation dialog mode - draw normal panes + dialog
-                top_height = max(5, usable_height * 2 // 5)
-                bottom_height = usable_height - top_height
-                top_win = curses.newwin(top_height, width, 0, 0)
-                bottom_win = curses.newwin(bottom_height, width, top_height, 0)
-                self.draw_top_pane(top_win, top_height, width)
-                self.draw_bottom_pane(bottom_win, bottom_height, width)
-                # Draw confirmation dialog on top
-                rel_path = self.get_relative_path(self.confirm_trash_item)
+                # Draw confirmation dialog
+                view = self.get_current_view()
+                main_win = curses.newwin(usable_height, width, 0, 0)
+
+                if view['type'] == 'main':
+                    self.draw_main_view(main_win, usable_height, width)
+                elif view['type'] == 'dir_detail':
+                    self.draw_dir_detail_view(main_win, usable_height, width)
+                elif view['type'] == 'file_detail':
+                    self.draw_file_detail_view(main_win, usable_height, width)
+
+                rel_path = self.get_path_with_root(self.confirm_trash_item)
                 message = f"There is only one copy of\n\n{rel_path}\n\nIf you trash it, you will lose data."
                 self.draw_confirmation_dialog(stdscr, message)
-
-                # Draw hint bar
                 self.draw_hint_bar(stdscr, 'confirm')
-            else:
-                # Normal mode - split screen
-                top_height = max(5, usable_height * 2 // 5)
-                bottom_height = usable_height - top_height
-                top_win = curses.newwin(top_height, width, 0, 0)
-                bottom_win = curses.newwin(bottom_height, width, top_height, 0)
-                self.draw_top_pane(top_win, top_height, width)
-                self.draw_bottom_pane(bottom_win, bottom_height, width)
 
-                # Draw hint bar
-                self.draw_hint_bar(stdscr, 'main')
+            else:
+                # Normal view - draw based on current view type
+                view = self.get_current_view()
+                main_win = curses.newwin(usable_height, width, 0, 0)
+
+                if view['type'] == 'main':
+                    self.draw_main_view(main_win, usable_height, width)
+                elif view['type'] == 'dir_detail':
+                    self.draw_dir_detail_view(main_win, usable_height, width)
+                elif view['type'] == 'file_detail':
+                    self.draw_file_detail_view(main_win, usable_height, width)
+
+                self.draw_hint_bar(stdscr, view['type'])
 
             # Handle input
             key = stdscr.getch()
@@ -1433,47 +1700,40 @@ Actions:
 
             # Handle confirmation dialog first (takes priority)
             if self.confirm_trash_item is not None:
-                if key in (ord('q'), ord('Q')):  # Q key - quit immediately
+                if key in (ord('q'), ord('Q')):
                     break
                 if key in (ord('y'), ord('Y')):
-                    # Confirmed - proceed with trashing
                     item_path, item_type = self.confirm_trash_item, self.confirm_trash_type
                     self.trash_item(item_path, item_type)
                     self.confirm_trash_item = None
                     self.confirm_trash_type = None
                     continue
                 elif key in (ord('n'), ord('N'), 27):  # n, N, or ESC
-                    # Cancelled
                     self.confirm_trash_item = None
                     self.confirm_trash_type = None
                     continue
                 elif key == ord('?'):
-                    # Show help
                     self.show_help_viewer(stdscr, 'confirm')
                     continue
                 else:
-                    # Ignore other keys in confirmation mode
                     continue
 
-            # Handle trash viewing mode (takes priority)
+            # Handle trash viewing mode
             if self.viewing_trash:
-                if key in (ord('q'), ord('Q')):  # Q key - quit immediately
+                if key in (ord('q'), ord('Q')):
                     break
-                elif key in (ord('T'),):  # T to toggle back to main view
-                    # If no duplicates found, don't allow toggle back (nothing to show)
+                elif key in (ord('T'),):
                     if not self.show_no_duplicates_message:
                         self.viewing_trash = False
                     continue
-                elif key == 27:  # ESC to exit trash view
-                    # If no duplicates found, don't allow toggle back (nothing to show)
+                elif key == 27:  # ESC
                     if not self.show_no_duplicates_message:
                         self.viewing_trash = False
                     continue
                 elif key == ord('?'):
-                    # Show help
                     self.show_help_viewer(stdscr, 'trash')
                     continue
-                elif key in (ord('o'), ord('O')):  # Open file with system default application
+                elif key in (ord('o'), ord('O')):
                     items = self.get_trash_items()
                     if items and self.trash_selected_idx < len(items):
                         item_dict = items[self.trash_selected_idx]
@@ -1493,241 +1753,37 @@ Actions:
                         self.trash_selected_idx += 1
                         if self.trash_selected_idx >= self.trash_offset + (height - 2):
                             self.trash_offset = self.trash_selected_idx - (height - 2) + 1
-                elif key in (ord('r'), ord('R')):  # Restore selected item
+                elif key in (ord('r'), ord('R')):
                     items = self.get_trash_items()
                     if items and self.trash_selected_idx < len(items):
                         if self.restore_from_trash(items[self.trash_selected_idx]):
-                            # Adjust selection if needed
                             items = self.get_trash_items()
                             if self.trash_selected_idx >= len(items) and len(items) > 0:
                                 self.trash_selected_idx = len(items) - 1
-
-                            # Check if we now have duplicates after restoration
                             if self.show_no_duplicates_message and self.sorted_dirs:
-                                # Duplicates found again! Exit trash mode and show main view
                                 self.show_no_duplicates_message = False
                                 self.viewing_trash = False
-                                continue
-                elif key in (curses.KEY_PPAGE, 2):  # Page Up or Ctrl-B
-                    items = self.get_trash_items()
-                    display_height = height - 2
-                    self.trash_selected_idx = max(0, self.trash_selected_idx - display_height)
-                    self.trash_offset = max(0, self.trash_offset - display_height)
-                elif key in (curses.KEY_NPAGE, 6):  # Page Down or Ctrl-F
-                    items = self.get_trash_items()
-                    display_height = height - 2
-                    self.trash_selected_idx = min(len(items) - 1, self.trash_selected_idx + display_height)
-                    if self.trash_selected_idx >= self.trash_offset + display_height:
-                        self.trash_offset = self.trash_selected_idx - display_height + 1
-                elif key in (curses.KEY_HOME, ord('<')):
-                    self.trash_selected_idx = 0
-                    self.trash_offset = 0
-                elif key in (curses.KEY_END, ord('>')):
-                    items = self.get_trash_items()
-                    self.trash_selected_idx = max(0, len(items) - 1)
-                    self.trash_offset = max(0, len(items) - (height - 2))
-                elif key in (ord('v'), ord('V')):  # View file in trash
-                    items = self.get_trash_items()
-                    if items and self.trash_selected_idx < len(items):
-                        item_dict = items[self.trash_selected_idx]
-                        trash_path = Path(item_dict['trash_path'])
-                        if trash_path.is_file():
-                            # Get file content once before entering viewer loop
-                            metadata_lines, content_lines, file_type = self.get_file_content_for_viewing(trash_path)
-
-                            # Enter file viewing mode
-                            scroll_offset = 0
-                            while True:
-                                # Get current terminal dimensions
-                                height, width = stdscr.getmaxyx()
-
-                                # Redraw trash viewer first (as background)
-                                top_height = max(5, height * 2 // 5)
-                                bottom_height = height - top_height
-                                top_win = curses.newwin(top_height, width, 0, 0)
-                                bottom_win = curses.newwin(bottom_height, width, top_height, 0)
-                                self.draw_top_pane(top_win, top_height, width)
-                                self.draw_bottom_pane(bottom_win, bottom_height, width)
-                                trash_height = int(height * 0.92)
-                                trash_width = int(width * 0.85)
-                                trash_y = (height - trash_height) // 2
-                                trash_x = (width - trash_width) // 2
-                                trash_win = curses.newwin(trash_height, trash_width, trash_y, trash_x)
-                                self.draw_trash_pane(trash_win, trash_height, trash_width)
-
-                                # Draw file viewer overlay on top
-                                scroll_offset, total_lines = self.draw_file_viewer(stdscr, trash_path, metadata_lines, content_lines, scroll_offset)
-
-                                # Draw hint bar
-                                self.draw_hint_bar(stdscr, 'viewer')
-
-                                # Handle viewer input
-                                view_key = stdscr.getch()
-
-                                if view_key in (ord('q'), ord('Q'), 27):  # q, Q, or ESC
-                                    break
-                                elif view_key == curses.KEY_RESIZE:
-                                    stdscr.clear()
-                                    stdscr.refresh()
-                                    continue
-                                elif view_key == ord('?'):
-                                    # Show help
-                                    self.show_help_viewer(stdscr, 'viewer')
-                                    continue
-                                elif view_key in (curses.KEY_UP, ord('k')):
-                                    scroll_offset = max(0, scroll_offset - 1)
-                                elif view_key in (curses.KEY_DOWN, ord('j')):
-                                    viewer_height = int(height * 0.85)
-                                    visible_height = viewer_height - 2
-                                    max_offset = max(0, total_lines - visible_height)
-                                    scroll_offset = min(max_offset, scroll_offset + 1)
-                                elif view_key in (curses.KEY_PPAGE, curses.KEY_NPAGE, 2, 6):  # PgUp/PgDn or Ctrl-B/Ctrl-F
-                                    viewer_height = int(height * 0.85)
-                                    visible_height = viewer_height - 2
-                                    if view_key in (curses.KEY_PPAGE, 2):  # Page Up or Ctrl-B
-                                        scroll_offset = max(0, scroll_offset - visible_height)
-                                    else:  # Page Down or Ctrl-F
-                                        max_offset = max(0, total_lines - visible_height)
-                                        scroll_offset = min(max_offset, scroll_offset + visible_height)
-                                elif view_key in (curses.KEY_HOME, ord('<')):
-                                    scroll_offset = 0
-                                elif view_key in (curses.KEY_END, ord('>')):
-                                    viewer_height = int(height * 0.85)
-                                    visible_height = viewer_height - 2
-                                    scroll_offset = max(0, total_lines - visible_height)
-                # Continue to redraw at top of loop
                 continue
 
-            # Tab to switch panes
-            if key == ord('\t'):  # Tab key
-                if self.active_pane == 'top':
-                    self.active_pane = 'bottom'
-                    # Set current_bottom_dir to the selected directory
-                    dirs_to_use = self.current_filtered_dirs if self.current_filtered_dirs else self.sorted_dirs
-                    if self.selected_idx < len(dirs_to_use):
-                        new_dir = dirs_to_use[self.selected_idx][0]
-                    else:
-                        new_dir = self.sorted_dirs[0][0] if self.sorted_dirs else None
-                    # If switching to a different directory, reset selection
-                    if self.current_bottom_dir != new_dir:
-                        self.current_bottom_dir = new_dir
-                        if hasattr(self, 'bottom_selectable_indices') and self.bottom_selectable_indices:
-                            self.bottom_selected_idx = self.bottom_selectable_indices[0]
-                        else:
-                            self.bottom_selected_idx = 0
-                        self.bottom_offset = 0
-                        self.selected_file = None  # Clear file filter when switching directories
-                    # Otherwise preserve the current selection (already set)
-                else:
-                    self.active_pane = 'top'
-                continue
+            # Normal navigation and actions
+            view = self.get_current_view()
+            list_size = self.get_current_list_size()
 
-            # Return key or Right arrow - context-sensitive drill down
-            if key in (ord('\n'), ord('\r'), curses.KEY_ENTER, curses.KEY_RIGHT, ord('l')):
-                if self.active_pane == 'top':
-                    # Switch to bottom pane
-                    self.active_pane = 'bottom'
-                    # Set current_bottom_dir to the selected directory
-                    dirs_to_use = self.current_filtered_dirs if self.current_filtered_dirs else self.sorted_dirs
-                    if self.selected_idx < len(dirs_to_use):
-                        new_dir = dirs_to_use[self.selected_idx][0]
-                    else:
-                        new_dir = self.sorted_dirs[0][0] if self.sorted_dirs else None
-                    # If switching to a different directory, reset selection
-                    if self.current_bottom_dir != new_dir:
-                        self.current_bottom_dir = new_dir
-                        if hasattr(self, 'bottom_selectable_indices') and self.bottom_selectable_indices:
-                            self.bottom_selected_idx = self.bottom_selectable_indices[0]
-                        else:
-                            self.bottom_selected_idx = 0
-                        self.bottom_offset = 0
-                        self.selected_file = None  # Clear file filter when switching directories
-                    self.show_quit_message = False
-                else:  # bottom pane
-                    # Check if current selection is a file - switch to top pane with filter
-                    if hasattr(self, 'bottom_line_to_file') and self.bottom_selected_idx in self.bottom_line_to_file:
-                        # File is already filtering top pane, just switch to top pane
-                        self.selected_file = self.bottom_line_to_file[self.bottom_selected_idx]
-                        # Push current state to navigation stack for back navigation
-                        self.navigation_stack.append({
-                            'type': 'file_filter',
-                            'selected_idx': self.selected_idx,
-                            'selected_file': None,  # Will restore to no filter
-                            'bottom_selected_idx': self.bottom_selected_idx,
-                            'current_bottom_dir': self.current_bottom_dir,
-                            'active_pane': 'bottom'
-                        })
-                        self.active_pane = 'top'
-                        self.selected_idx = 0
-                        self.top_offset = 0
-                    # Check if current selection is a related directory
-                    elif hasattr(self, 'bottom_line_to_dir') and self.bottom_selected_idx in self.bottom_line_to_dir:
-                        # Jump to that directory in top pane
-                        target_idx = self.bottom_line_to_dir[self.bottom_selected_idx]
-                        # Push current directory to navigation stack
-                        self.navigation_stack.append({
-                            'type': 'directory',
-                            'selected_idx': self.selected_idx,
-                            'selected_file': self.selected_file,
-                            'current_bottom_dir': self.current_bottom_dir,
-                            'bottom_selected_idx': self.bottom_selected_idx,
-                            'active_pane': 'bottom'
-                        })
-                        # Jump to target directory
-                        self.selected_idx = target_idx
-                        self.active_pane = 'top'
-                        self.current_bottom_dir = None  # Will be set when entering bottom pane
-                        self.selected_file = None
-                        # Adjust scroll to show selected directory
-                        if self.selected_idx < self.top_offset:
-                            self.top_offset = self.selected_idx
-                        elif self.selected_idx >= self.top_offset + (top_height - 2):
-                            self.top_offset = self.selected_idx - (top_height - 2) + 1
-                continue
-
-            # Escape key or Left arrow - context-sensitive behavior
-            if key in (27, curses.KEY_LEFT, ord('h')):  # ESC or Left arrow
-                if self.active_pane == 'bottom':
-                    # Switch to top pane and clear filter (show all directories)
-                    self.active_pane = 'top'
-                    self.selected_file = None
-                    self.navigation_stack = []  # Clear navigation stack
-                    self.show_quit_message = False
-                else:  # top pane
-                    # Left arrow in top pane - pop from navigation stack if available
-                    if key in (curses.KEY_LEFT, ord('h')) and self.navigation_stack:
-                        nav_state = self.navigation_stack.pop()
-                        if isinstance(nav_state, dict):
-                            self.selected_idx = nav_state.get('selected_idx', 0)
-                            self.selected_file = nav_state.get('selected_file', None)
-                            self.current_bottom_dir = nav_state.get('current_bottom_dir', None)
-                            # Restore active pane and bottom selection if available
-                            if 'active_pane' in nav_state:
-                                self.active_pane = nav_state['active_pane']
-                            if 'bottom_selected_idx' in nav_state:
-                                self.bottom_selected_idx = nav_state.get('bottom_selected_idx', 0)
-                        else:
-                            # Legacy: just an index
-                            self.selected_idx = nav_state
-                            self.selected_file = None
-                            self.current_bottom_dir = None
-                        # Adjust scroll to show selected directory
-                        if self.selected_idx < self.top_offset:
-                            self.top_offset = self.selected_idx
-                        elif self.selected_idx >= self.top_offset + (top_height - 2):
-                            self.top_offset = self.selected_idx - (top_height - 2) + 1
-                    elif self.selected_file:
-                        # Clear file filter, stay on current directory
-                        self.selected_file = None
-                        # Don't reset selected_idx - keep showing the same directory
-                    elif key == 27:
-                        # ESC shows quit message
-                        self.show_quit_message = True
-                continue
-
-            # Q key - quit immediately
+            # Q key - quit
             if key in (ord('q'), ord('Q')):
                 break
+
+            # ESC / Left arrow - go back
+            elif key in (27, curses.KEY_LEFT, ord('h')):
+                if not self.pop_view():
+                    self.show_quit_message = True
+                continue
+
+            # ? key - help
+            elif key == ord('?'):
+                self.show_help_viewer(stdscr, view['type'])
+                continue
+
             # T key - view trash
             elif key in (ord('T'),):
                 if not self.viewing_trash:
@@ -1735,249 +1791,59 @@ Actions:
                     self.trash_selected_idx = 0
                     self.trash_offset = 0
                 continue
-            # U key - undo last trash operation
+
+            # U key - undo last trash
             elif key in (ord('u'), ord('U')):
                 self.undo_last_trash()
                 continue
-            # ? key - show help
-            elif key == ord('?'):
-                # Show help
-                self.show_help_viewer(stdscr, 'main')
-                continue
-            # O key - open file with system default application
-            elif key in (ord('o'), ord('O')):
-                # Only allow opening files from bottom pane
-                if self.active_pane == 'bottom':
-                    if hasattr(self, 'bottom_line_to_file') and self.bottom_selected_idx in self.bottom_line_to_file:
-                        file_path = self.bottom_line_to_file[self.bottom_selected_idx]
-                        if file_path.is_file():
-                            self.open_file_with_system_app(file_path)
-                continue
-            # T key - trash file or directory
-            elif key == ord('t'):
-                item_to_trash = None
-                trash_type = None
 
-                if self.active_pane == 'top':
-                    # Trash selected directory
-                    dirs_to_use = self.current_filtered_dirs if self.current_filtered_dirs else self.sorted_dirs
-                    if self.selected_idx < len(dirs_to_use):
-                        dir_path = dirs_to_use[self.selected_idx][0]
-                        item_to_trash = dir_path
-                        trash_type = 'directory'
-                elif self.active_pane == 'bottom':
-                    # Trash selected file
-                    if hasattr(self, 'bottom_line_to_file') and self.bottom_selected_idx in self.bottom_line_to_file:
-                        file_path = self.bottom_line_to_file[self.bottom_selected_idx]
-                        item_to_trash = file_path
-                        trash_type = 'file'
-
-                if item_to_trash:
-                    # Check if we need confirmation
-                    needs_confirmation = False
-                    num_roots = len(self.root_paths)
-
-                    if trash_type == 'file':
-                        count = self.get_file_redundancy_count(item_to_trash)
-                        if count < num_roots:
-                            needs_confirmation = True
-                    else:  # directory
-                        if not self.is_dir_fully_redundant(item_to_trash):
-                            needs_confirmation = True
-
-                    if needs_confirmation:
-                        # Set confirmation state - will be drawn at top of loop
-                        self.confirm_trash_item = item_to_trash
-                        self.confirm_trash_type = trash_type
-                    else:
-                        # Trash immediately
-                        was_in_bottom_pane = (self.active_pane == 'bottom' and trash_type == 'file')
-                        self.trash_item(item_to_trash, trash_type)
-
-                        # After trashing, clear navigation stack so left arrow works correctly
-                        self.navigation_stack = []
-
-                        # If we trashed a file from bottom pane, the filter needs updating
-                        # The bottom_line_to_file mapping is stale, so just clear the filter
-                        # It will be rebuilt on next draw with the new file list
-                        if was_in_bottom_pane:
-                            self.selected_file = None
-                continue
-            # V key - view file
-            elif key in (ord('v'), ord('V')):
-
-                # Only allow viewing files from bottom pane
-                if self.active_pane == 'bottom':
-                    if hasattr(self, 'bottom_line_to_file') and self.bottom_selected_idx in self.bottom_line_to_file:
-                        file_path = self.bottom_line_to_file[self.bottom_selected_idx]
-                        if file_path.is_file():
-                            # Get file content once before entering viewer loop
-                            metadata_lines, content_lines, file_type = self.get_file_content_for_viewing(file_path)
-
-                            # Enter file viewing mode
-                            scroll_offset = 0
-                            while True:
-                                # Get current terminal dimensions
-                                height, width = stdscr.getmaxyx()
-
-                                # Redraw main screen first (as background)
-                                top_height = max(5, height * 2 // 5)
-                                bottom_height = height - top_height
-                                top_win = curses.newwin(top_height, width, 0, 0)
-                                bottom_win = curses.newwin(bottom_height, width, top_height, 0)
-                                self.draw_top_pane(top_win, top_height, width)
-                                self.draw_bottom_pane(bottom_win, bottom_height, width)
-
-                                # Draw file viewer overlay on top
-                                scroll_offset, total_lines = self.draw_file_viewer(stdscr, file_path, metadata_lines, content_lines, scroll_offset)
-
-                                # Draw hint bar
-                                self.draw_hint_bar(stdscr, 'viewer')
-
-                                # Handle viewer input
-                                view_key = stdscr.getch()
-
-                                if view_key in (ord('q'), ord('Q'), 27):  # q, Q, or ESC
-                                    break
-                                elif view_key == curses.KEY_RESIZE:
-                                    stdscr.clear()
-                                    stdscr.refresh()
-                                    continue
-                                elif view_key == ord('?'):
-                                    # Show help
-                                    self.show_help_viewer(stdscr, 'viewer')
-                                    continue
-                                elif view_key in (curses.KEY_UP, ord('k')):
-                                    scroll_offset = max(0, scroll_offset - 1)
-                                elif view_key in (curses.KEY_DOWN, ord('j')):
-                                    viewer_height = int(height * 0.85)
-                                    visible_height = viewer_height - 2
-                                    max_offset = max(0, total_lines - visible_height)
-                                    scroll_offset = min(max_offset, scroll_offset + 1)
-                                elif view_key in (curses.KEY_PPAGE, curses.KEY_NPAGE, 2, 6):  # PgUp/PgDn or Ctrl-B/Ctrl-F
-                                    viewer_height = int(height * 0.85)
-                                    visible_height = viewer_height - 2
-                                    if view_key in (curses.KEY_PPAGE, 2):  # Page Up or Ctrl-B
-                                        scroll_offset = max(0, scroll_offset - visible_height)
-                                    else:  # Page Down or Ctrl-F
-                                        max_offset = max(0, total_lines - visible_height)
-                                        scroll_offset = min(max_offset, scroll_offset + visible_height)
-                                elif view_key in (curses.KEY_HOME, ord('<')):
-                                    scroll_offset = 0
-                                elif view_key in (curses.KEY_END, ord('>')):
-                                    viewer_height = int(height * 0.85)
-                                    visible_height = viewer_height - 2
-                                    scroll_offset = max(0, total_lines - visible_height)
-                continue
+            # Navigation keys
             elif key in (curses.KEY_UP, ord('k')):
-                self.show_quit_message = False
-                if self.active_pane == 'top':
-                    if self.selected_idx > 0:
-                        self.selected_idx -= 1
-                        # Mark that bottom pane needs refresh for new directory
-                        self.last_bottom_dir_idx = None
-                        # Adjust top offset if needed
-                        if self.selected_idx < self.top_offset:
-                            self.top_offset = self.selected_idx
-                else:  # bottom pane
-                    if hasattr(self, 'bottom_selectable_indices') and self.bottom_selectable_indices:
-                        current_pos = self.bottom_selectable_indices.index(self.bottom_selected_idx) if self.bottom_selected_idx in self.bottom_selectable_indices else 0
-                        if current_pos > 0:
-                            self.bottom_selected_idx = self.bottom_selectable_indices[current_pos - 1]
-                            # Adjust bottom offset if needed
-                            if self.bottom_selected_idx < self.bottom_offset:
-                                self.bottom_offset = self.bottom_selected_idx
-                            # Update file filter based on new selection
-                            if hasattr(self, 'bottom_line_to_file') and self.bottom_selected_idx in self.bottom_line_to_file:
-                                self.selected_file = self.bottom_line_to_file[self.bottom_selected_idx]
-                            else:
-                                self.selected_file = None
+                if self.selected_idx > 0:
+                    self.selected_idx -= 1
+                    if self.selected_idx < self.scroll_offset:
+                        self.scroll_offset = self.selected_idx
             elif key in (curses.KEY_DOWN, ord('j')):
-                self.show_quit_message = False
-                if self.active_pane == 'top':
-                    # Use filtered dirs for bounds checking
-                    max_idx = len(self.current_filtered_dirs) - 1 if hasattr(self, 'current_filtered_dirs') and self.current_filtered_dirs else len(self.sorted_dirs) - 1
-                    if self.selected_idx < max_idx:
-                        self.selected_idx += 1
-                        # Mark that bottom pane needs refresh for new directory
-                        self.last_bottom_dir_idx = None
-                        # Adjust top offset if needed
-                        display_height = top_height - 2
-                        if self.selected_idx >= self.top_offset + display_height:
-                            self.top_offset = self.selected_idx - display_height + 1
-                else:  # bottom pane
-                    if hasattr(self, 'bottom_selectable_indices') and self.bottom_selectable_indices:
-                        current_pos = self.bottom_selectable_indices.index(self.bottom_selected_idx) if self.bottom_selected_idx in self.bottom_selectable_indices else -1
-                        if current_pos < len(self.bottom_selectable_indices) - 1:
-                            self.bottom_selected_idx = self.bottom_selectable_indices[current_pos + 1]
-                            # Adjust bottom offset if needed
-                            display_height = bottom_height - 2
-                            if self.bottom_selected_idx >= self.bottom_offset + display_height:
-                                self.bottom_offset = self.bottom_selected_idx - display_height + 1
-                            # Update file filter based on new selection
-                            if hasattr(self, 'bottom_line_to_file') and self.bottom_selected_idx in self.bottom_line_to_file:
-                                self.selected_file = self.bottom_line_to_file[self.bottom_selected_idx]
-                            else:
-                                self.selected_file = None
-            elif key in (curses.KEY_PPAGE, 2):  # Page Up or Ctrl-B
-                self.show_quit_message = False
-                if self.active_pane == 'top':
-                    self.selected_idx = max(0, self.selected_idx - (top_height - 2))
-                    self.top_offset = max(0, self.top_offset - (top_height - 2))
-                    self.last_bottom_dir_idx = None
-                else:
-                    if hasattr(self, 'bottom_selectable_indices') and self.bottom_selectable_indices:
-                        current_pos = self.bottom_selectable_indices.index(self.bottom_selected_idx) if self.bottom_selected_idx in self.bottom_selectable_indices else 0
-                        new_pos = max(0, current_pos - (bottom_height - 2))
-                        self.bottom_selected_idx = self.bottom_selectable_indices[new_pos]
-                        self.bottom_offset = max(0, self.bottom_selected_idx - (bottom_height - 2))
-            elif key in (curses.KEY_NPAGE, 6):  # Page Down or Ctrl-F
-                self.show_quit_message = False
-                if self.active_pane == 'top':
-                    display_height = top_height - 2
-                    max_idx = len(self.current_filtered_dirs) - 1 if hasattr(self, 'current_filtered_dirs') and self.current_filtered_dirs else len(self.sorted_dirs) - 1
-                    self.selected_idx = min(max_idx, self.selected_idx + display_height)
-                    total_dirs = len(self.current_filtered_dirs) if hasattr(self, 'current_filtered_dirs') and self.current_filtered_dirs else len(self.sorted_dirs)
-                    self.top_offset = min(max(0, total_dirs - display_height),
-                                         self.top_offset + display_height)
-                    self.last_bottom_dir_idx = None
-                else:
-                    if hasattr(self, 'bottom_selectable_indices') and self.bottom_selectable_indices:
-                        current_pos = self.bottom_selectable_indices.index(self.bottom_selected_idx) if self.bottom_selected_idx in self.bottom_selectable_indices else 0
-                        new_pos = min(len(self.bottom_selectable_indices) - 1, current_pos + (bottom_height - 2))
-                        self.bottom_selected_idx = self.bottom_selectable_indices[new_pos]
-                        display_height = bottom_height - 2
-                        if self.bottom_selected_idx >= self.bottom_offset + display_height:
-                            self.bottom_offset = self.bottom_selected_idx - display_height + 1
+                if self.selected_idx < list_size - 1:
+                    self.selected_idx += 1
+                    visible_lines = usable_height - 5
+                    if self.selected_idx >= self.scroll_offset + visible_lines:
+                        self.scroll_offset = self.selected_idx - visible_lines + 1
+            elif key in (curses.KEY_PPAGE, 2):  # Page Up / Ctrl-B
+                visible_lines = usable_height - 5
+                self.selected_idx = max(0, self.selected_idx - visible_lines)
+                self.scroll_offset = max(0, self.scroll_offset - visible_lines)
+            elif key in (curses.KEY_NPAGE, 6):  # Page Down / Ctrl-F
+                visible_lines = usable_height - 5
+                self.selected_idx = min(list_size - 1, self.selected_idx + visible_lines)
+                self.scroll_offset = min(self.scroll_offset + visible_lines, max(0, list_size - visible_lines))
+            elif key in (curses.KEY_HOME, ord('g')):
+                self.selected_idx = 0
+                self.scroll_offset = 0
+            elif key in (curses.KEY_END, ord('G')):
+                self.selected_idx = list_size - 1
+                visible_lines = usable_height - 5
+                self.scroll_offset = max(0, list_size - visible_lines)
 
-            elif key in (curses.KEY_HOME, ord('<')):  # Home or <
-                self.show_quit_message = False
-                if self.active_pane == 'top':
-                    self.selected_idx = 0
-                    self.top_offset = 0
-                    self.last_bottom_dir_idx = None
-                else:
-                    if hasattr(self, 'bottom_selectable_indices') and self.bottom_selectable_indices:
-                        self.bottom_selected_idx = self.bottom_selectable_indices[0]
-                    else:
-                        self.bottom_selected_idx = 0
-                    self.bottom_offset = 0
-            elif key in (curses.KEY_END, ord('>')):  # End or >
-                self.show_quit_message = False
-                if self.active_pane == 'top':
-                    total_dirs = len(self.current_filtered_dirs) if hasattr(self, 'current_filtered_dirs') and self.current_filtered_dirs else len(self.sorted_dirs)
-                    self.selected_idx = total_dirs - 1
-                    display_height = top_height - 2
-                    self.top_offset = max(0, total_dirs - display_height)
-                    self.last_bottom_dir_idx = None
-                else:
-                    if hasattr(self, 'bottom_selectable_indices') and self.bottom_selectable_indices:
-                        self.bottom_selected_idx = self.bottom_selectable_indices[-1]
-                        display_height = bottom_height - 2
-                        self.bottom_offset = max(0, self.bottom_selected_idx - display_height + 1)
-            elif key == curses.KEY_RESIZE:
-                stdscr.clear()
+            # Enter key - drill down
+            elif key in (curses.KEY_ENTER, ord('\n'), ord('\r')):
+                self.handle_enter_key(view)
+                continue
 
+            # 't' key - trash item
+            elif key == ord('t'):
+                self.handle_trash_key(view)
+                continue
+
+            # 'v' key - view file
+            elif key in (ord('v'), ord('V')):
+                self.handle_view_key(view, stdscr, height, width)
+                continue
+
+            # 'o' key - open file
+            elif key in (ord('o'), ord('O')):
+                self.handle_open_key(view)
+                continue
 
 def main():
     import argparse

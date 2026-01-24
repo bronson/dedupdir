@@ -1,5 +1,8 @@
 # [dedupdir](https://github.com/bronson/dedupdir) Changelog
 
+## [0.2.XX] - 2026-XX
+* convert the two-pane UI back to single-pane
+
 ## [0.1.0] - 2026-01-21
 * rename project from redundir to dedupdir
   * The previous name implied that we want to make things more redundant, not less.
