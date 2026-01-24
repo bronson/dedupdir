@@ -307,6 +307,12 @@ class DedupdirTUI:
 
     def push_view(self, view):
         """Push a new view onto the stack."""
+        # Save current selection state in the current view
+        if self.view_stack:
+            current = self.view_stack[-1]
+            current['selected_idx'] = self.selected_idx
+            current['scroll_offset'] = self.scroll_offset
+
         self.view_stack.append(view)
         self.selected_idx = 0
         self.scroll_offset = 0
@@ -315,8 +321,10 @@ class DedupdirTUI:
         """Pop the current view and return to the previous one."""
         if len(self.view_stack) > 1:
             self.view_stack.pop()
-            self.selected_idx = 0
-            self.scroll_offset = 0
+            # Restore selection state from the previous view
+            prev_view = self.view_stack[-1]
+            self.selected_idx = prev_view.get('selected_idx', 0)
+            self.scroll_offset = prev_view.get('scroll_offset', 0)
             return True
         return False
 
@@ -327,9 +335,8 @@ class DedupdirTUI:
             return len(self.sorted_dirs)
         elif view['type'] == 'dir_detail':
             dir_path = view['data']['dir_path']
-            related_dirs = self.get_related_dirs(dir_path)
             files = self.get_all_files_with_counts(dir_path)
-            return len(related_dirs) + len(files)
+            return len(files)
         elif view['type'] == 'file_detail':
             file_path = view['data']['file_path']
             return len(self.get_dirs_containing_file(file_path))
@@ -598,7 +605,7 @@ class DedupdirTUI:
         except:
             return "-----"
 
-    def draw_main_view(self, win, height, width):
+    def draw_main_view(self, win, height, width, selected_idx, scroll_offset):
         """Draw the main directory list view."""
         win.clear()
         win.border()
@@ -657,7 +664,7 @@ class DedupdirTUI:
         # Display directories
         display_height = height - 3  # Account for border, header, and bottom border
         for i in range(display_height):
-            idx = self.scroll_offset + i
+            idx = scroll_offset + i
             if idx >= len(self.sorted_dirs):
                 break
 
@@ -679,7 +686,7 @@ class DedupdirTUI:
                 line = line[:max_len-3] + "..."
 
             y = i + 2  # Start after header
-            attr = curses.A_REVERSE if idx == self.selected_idx else curses.A_NORMAL
+            attr = curses.A_REVERSE if idx == selected_idx else curses.A_NORMAL
             try:
                 win.addstr(y, 1, line.ljust(width - 2), attr)
             except curses.error:
@@ -687,148 +694,70 @@ class DedupdirTUI:
 
         win.refresh()
 
-    def draw_dir_detail_view(self, win, height, width):
-        """Draw directory detail view showing related directories and files."""
-        view = self.get_current_view()
+    def draw_dir_detail_view(self, win, height, width, view, selected_idx, scroll_offset):
+        """Draw directory detail view showing only files in that directory."""
         dir_path = view['data']['dir_path']
 
         win.clear()
         win.border()
 
-        title = f" Directory: {self.get_path_with_root(dir_path)} "
+        title = f" {self.get_path_with_root(dir_path)}/ "
         try:
             win.addstr(0, 2, title[:width-4], curses.A_BOLD)
         except curses.error:
             pass
 
-        # Get related directories and files
-        related_dirs = self.get_related_dirs(dir_path)
+        # Get files in this directory
         files = self.get_all_files_with_counts(dir_path)
 
-        # Calculate split: 40% for related dirs, 60% for files (minimum 5 lines each)
-        total_lines = height - 3
-        related_lines = max(5, min(len(related_dirs) + 2, int(total_lines * 0.4)))
-        file_lines = total_lines - related_lines
-
-        current_line = 1
-
-        # Draw related directories section
+        # Headers
         try:
-            win.addstr(current_line, 1, f"Related Directories ({len(related_dirs)}):", curses.A_BOLD)
-            current_line += 1
-
-            if related_dirs:
-                # Headers
-                win.addstr(current_line, 1, " Shared", curses.A_BOLD | curses.A_UNDERLINE)
-                win.addstr(current_line, 10, "%Dup", curses.A_BOLD | curses.A_UNDERLINE)
-                win.addstr(current_line, 17, "Dup", curses.A_BOLD | curses.A_UNDERLINE)
-                win.addstr(current_line, 22, "Total", curses.A_BOLD | curses.A_UNDERLINE)
-                win.addstr(current_line, 29, "Path", curses.A_BOLD | curses.A_UNDERLINE)
-                current_line += 1
-
-                # Calculate which items are in "related dirs" section (top of list)
-                related_end_idx = len(related_dirs)
-
-                # Calculate starting index for this section
-                if self.selected_idx < len(related_dirs):
-                    # Selected is in related dirs - show from scroll_offset
-                    start_idx = self.scroll_offset
-                else:
-                    # Selected is in files - show all related dirs if they fit
-                    start_idx = 0
-
-                for i in range(related_lines - 3):
-                    idx = start_idx + i
-                    if idx >= len(related_dirs):
-                        break
-
-                    rel_dir, shared, dups, total = related_dirs[idx]
-                    score = calculate_redundancy_score(dups, total)
-                    path_str = self.get_path_with_root(rel_dir)
-
-                    shared_col = f"{shared:5d}"
-                    percent_col = f"{score:5.1%}" if score > 0 else "  0% "
-                    dup_col = f"{dups:3d}"
-                    total_col = f"{total:5d}"
-
-                    line = f"{shared_col}  {percent_col} {dup_col}  {total_col}  {path_str}"
-                    max_len = width - 3
-                    if len(line) > max_len:
-                        line = line[:max_len-3] + "..."
-
-                    attr = curses.A_REVERSE if idx == self.selected_idx else curses.A_NORMAL
-                    win.addstr(current_line, 1, line.ljust(width - 2), attr)
-                    current_line += 1
-            else:
-                current_line += 1
-                win.addstr(current_line, 1, "  (No related directories)")
-                current_line += 1
+            win.addstr(2, 1, f"Files in Directory ({len(files)}):", curses.A_BOLD)
+            win.addstr(3, 1, " Copies", curses.A_BOLD | curses.A_UNDERLINE)
+            win.addstr(3, 10, "Filename", curses.A_BOLD | curses.A_UNDERLINE)
         except curses.error:
             pass
 
-        # Draw separator
-        current_line = related_lines + 1
-        try:
-            win.addstr(current_line, 0, "├" + "─" * (width - 2) + "┤")
-            current_line += 1
-        except curses.error:
-            pass
+        if not files:
+            try:
+                win.addstr(4, 1, "  (No files)")
+            except curses.error:
+                pass
+            win.refresh()
+            return
 
-        # Draw files section
-        try:
-            win.addstr(current_line, 1, f"Files in Directory ({len(files)}):", curses.A_BOLD)
-            current_line += 1
+        # Display files
+        display_height = height - 5  # Account for border, title, section header, column header
+        for i in range(display_height):
+            idx = scroll_offset + i
+            if idx >= len(files):
+                break
 
-            if files:
-                # Headers
-                win.addstr(current_line, 1, " Copies", curses.A_BOLD | curses.A_UNDERLINE)
-                win.addstr(current_line, 10, "Filename", curses.A_BOLD | curses.A_UNDERLINE)
-                current_line += 1
+            filename, count, file_path = files[idx]
+            count_col = f"{count:5d}"
+            line = f"{count_col}   {filename}"
 
-                # Files start after related_dirs in the item list
-                file_start_idx = len(related_dirs)
+            max_len = width - 3
+            if len(line) > max_len:
+                line = line[:max_len-3] + "..."
 
-                # Calculate starting file index based on selection
-                if self.selected_idx >= len(related_dirs):
-                    # Selected is in files section
-                    file_scroll = max(0, self.scroll_offset - len(related_dirs))
-                else:
-                    # Selected is in related dirs - show from beginning of files
-                    file_scroll = 0
-
-                for i in range(file_lines - 3):
-                    file_idx = file_scroll + i
-                    if file_idx >= len(files):
-                        break
-
-                    filename, count, file_path = files[file_idx]
-                    count_col = f"{count:5d}"
-                    line = f"{count_col}   {filename}"
-
-                    max_len = width - 3
-                    if len(line) > max_len:
-                        line = line[:max_len-3] + "..."
-
-                    list_idx = file_start_idx + file_idx
-                    attr = curses.A_REVERSE if list_idx == self.selected_idx else curses.A_NORMAL
-                    win.addstr(current_line, 1, line.ljust(width - 2), attr)
-                    current_line += 1
-            else:
-                win.addstr(current_line, 1, "  (No files)")
-        except curses.error:
-            pass
+            y = i + 4  # Start after headers
+            attr = curses.A_REVERSE if idx == selected_idx else curses.A_NORMAL
+            try:
+                win.addstr(y, 1, line.ljust(width - 2), attr)
+            except curses.error:
+                pass
 
         win.refresh()
 
-    def draw_file_detail_view(self, win, height, width):
+    def draw_file_detail_view(self, win, height, width, view, selected_idx, scroll_offset):
         """Draw file detail view showing all directories containing this file."""
-        view = self.get_current_view()
         file_path = view['data']['file_path']
 
         win.clear()
         win.border()
 
-        title = f" File: {file_path.name} "
+        title = f" {self.get_path_with_root(file_path)} "
         try:
             win.addstr(0, 2, title[:width-4], curses.A_BOLD)
         except curses.error:
@@ -851,7 +780,7 @@ class DedupdirTUI:
         # Display directories
         display_height = height - 5
         for i in range(display_height):
-            idx = self.scroll_offset + i
+            idx = scroll_offset + i
             if idx >= len(dirs_with_file):
                 break
 
@@ -875,7 +804,7 @@ class DedupdirTUI:
                 line = line[:max_len-3] + "..."
 
             y = i + 4
-            attr = curses.A_REVERSE if idx == self.selected_idx else curses.A_NORMAL
+            attr = curses.A_REVERSE if idx == selected_idx else curses.A_NORMAL
             try:
                 win.addstr(y, 1, line.ljust(width - 2), attr)
             except curses.error:
@@ -1422,25 +1351,12 @@ Actions:
                 self.push_view({'type': 'dir_detail', 'data': {'dir_path': dir_path}})
 
         elif view['type'] == 'dir_detail':
+            # Drilling into a file from directory view
             dir_path = view['data']['dir_path']
-            related_dirs = self.get_related_dirs(dir_path)
             files = self.get_all_files_with_counts(dir_path)
 
-            # Check if selecting a related directory or a file
-            if self.selected_idx < len(related_dirs):
-                # Selected a related directory - drill into it
-                rel_dir, shared, dups, total = related_dirs[self.selected_idx]
-                self.push_view({'type': 'dir_detail', 'data': {'dir_path': rel_dir}})
-
-            if self.selected_idx < len(related_dirs):
-                # Trashing a related directory
-                rel_dir, _, _, _ = related_dirs[self.selected_idx]
-                item_to_trash = rel_dir
-                trash_type = 'directory'
-            elif self.selected_idx < len(related_dirs) + len(files):
-                # Selected a file - show file detail
-                file_idx = self.selected_idx - len(related_dirs)
-                filename, _, file_path = files[file_idx]
+            if self.selected_idx < len(files):
+                filename, _, file_path = files[self.selected_idx]
                 self.push_view({'type': 'file_detail', 'data': {'file_path': file_path}})
 
         elif view['type'] == 'file_detail':
@@ -1464,25 +1380,17 @@ Actions:
                 trash_type = 'directory'
 
         elif view['type'] == 'dir_detail':
+            # Trashing a file from directory view
             dir_path = view['data']['dir_path']
-            related_dirs = self.get_related_dirs(dir_path)
             files = self.get_all_files_with_counts(dir_path)
 
-            if self.selected_idx < len(related_dirs):
-                # Trashing a related directory
-                rel_dir, _, _, _ = related_dirs[self.selected_idx]
-                item_to_trash = rel_dir
-                trash_type = 'directory'
-            elif self.selected_idx < len(related_dirs) + len(files):
-                # Trashing a file
-                file_idx = self.selected_idx - len(related_dirs)
-                _, _, file_path = files[file_idx]
+            if self.selected_idx < len(files):
+                _, _, file_path = files[self.selected_idx]
                 item_to_trash = file_path
                 trash_type = 'file'
 
         elif view['type'] == 'file_detail':
-            # Can't trash from file detail view (would be confusing which copy to trash)
-            # Could trash the selected directory instead
+            # Trashing a directory from file detail view
             file_path = view['data']['file_path']
             dirs_with_file = self.get_dirs_containing_file(file_path)
             if self.selected_idx < len(dirs_with_file):
@@ -1515,14 +1423,12 @@ Actions:
         file_path = None
 
         if view['type'] == 'dir_detail':
+            # Open file from directory view
             dir_path = view['data']['dir_path']
-            related_dirs = self.get_related_dirs(dir_path)
             files = self.get_all_files_with_counts(dir_path)
 
-            # Only works on files
-            if self.selected_idx >= len(related_dirs) and self.selected_idx < len(related_dirs) + len(files):
-                file_idx = self.selected_idx - len(related_dirs)
-                _, _, file_path = files[file_idx]
+            if self.selected_idx < len(files):
+                _, _, file_path = files[self.selected_idx]
 
         elif view['type'] == 'file_detail':
             # View the file itself
@@ -1593,14 +1499,12 @@ Actions:
         file_path = None
 
         if view['type'] == 'dir_detail':
+            # View file from directory view
             dir_path = view['data']['dir_path']
-            related_dirs = self.get_related_dirs(dir_path)
             files = self.get_all_files_with_counts(dir_path)
 
-            # Only works on files
-            if self.selected_idx >= len(related_dirs) and self.selected_idx < len(related_dirs) + len(files):
-                file_idx = self.selected_idx - len(related_dirs)
-                _, _, file_path = files[file_idx]
+            if self.selected_idx < len(files):
+                _, _, file_path = files[self.selected_idx]
 
         elif view['type'] == 'file_detail':
             # Open the file itself
@@ -1647,7 +1551,7 @@ Actions:
                 view = self.get_current_view()
                 if view['type'] == 'main':
                     main_win = curses.newwin(usable_height, width, 0, 0)
-                    self.draw_main_view(main_win, usable_height, width)
+                    self.draw_main_view(main_win, usable_height, width, self.selected_idx, self.scroll_offset)
 
                 # Draw trash viewer as centered overlay (85% width, 92% height)
                 trash_height = int(usable_height * 0.92)
@@ -1664,11 +1568,11 @@ Actions:
                 main_win = curses.newwin(usable_height, width, 0, 0)
 
                 if view['type'] == 'main':
-                    self.draw_main_view(main_win, usable_height, width)
+                    self.draw_main_view(main_win, usable_height, width, self.selected_idx, self.scroll_offset)
                 elif view['type'] == 'dir_detail':
-                    self.draw_dir_detail_view(main_win, usable_height, width)
+                    self.draw_dir_detail_view(main_win, usable_height, width, view, self.selected_idx, self.scroll_offset)
                 elif view['type'] == 'file_detail':
-                    self.draw_file_detail_view(main_win, usable_height, width)
+                    self.draw_file_detail_view(main_win, usable_height, width, view, self.selected_idx, self.scroll_offset)
 
                 rel_path = self.get_path_with_root(self.confirm_trash_item)
                 message = f"There is only one copy of\n\n{rel_path}\n\nIf you trash it, you will lose data."
@@ -1676,17 +1580,57 @@ Actions:
                 self.draw_hint_bar(stdscr, 'confirm')
 
             else:
-                # Normal view - draw based on current view type
-                view = self.get_current_view()
+                # Normal view - draw all views in stack with 3-col, 1-row indent per level
+                # First, draw the main view (always at bottom) with its saved selection
                 main_win = curses.newwin(usable_height, width, 0, 0)
+                main_view = self.view_stack[0]
+                if len(self.view_stack) == 1:
+                    # Main view is current - use live selection
+                    main_selected = self.selected_idx
+                    main_scroll = self.scroll_offset
+                else:
+                    # Main view is background - use frozen selection
+                    main_selected = main_view.get('selected_idx', 0)
+                    main_scroll = main_view.get('scroll_offset', 0)
+                self.draw_main_view(main_win, usable_height, width, main_selected, main_scroll)
 
-                if view['type'] == 'main':
-                    self.draw_main_view(main_win, usable_height, width)
-                elif view['type'] == 'dir_detail':
-                    self.draw_dir_detail_view(main_win, usable_height, width)
-                elif view['type'] == 'file_detail':
-                    self.draw_file_detail_view(main_win, usable_height, width)
+                # Then draw each overlay in the stack (skip index 0 which is always 'main')
+                for level_idx in range(1, len(self.view_stack)):
+                    level_view = self.view_stack[level_idx]
 
+                    # Each level is indented 4 columns and 1 row from the previous
+                    indent_x = level_idx * 4
+                    indent_y = level_idx * 1
+
+                    # Calculate overlay size (descend 1 row but extend to bottom)
+                    overlay_height = usable_height - indent_y
+                    overlay_width = width - indent_x
+
+                    # Make sure we have room
+                    if overlay_height < 10 or overlay_width < 40:
+                        break
+
+                    # Determine if this is the current view or a background view
+                    is_current_view = (level_idx == len(self.view_stack) - 1)
+
+                    # For background views, use their saved selection; for current view, use live selection
+                    if is_current_view:
+                        # Current view - use live selection (responds to arrow keys)
+                        draw_selected_idx = self.selected_idx
+                        draw_scroll_offset = self.scroll_offset
+                    else:
+                        # Background view - use frozen saved selection
+                        draw_selected_idx = level_view.get('selected_idx', 0)
+                        draw_scroll_offset = level_view.get('scroll_offset', 0)
+
+                    # Draw the overlay with the appropriate selection
+                    overlay_win = curses.newwin(overlay_height, overlay_width, indent_y, indent_x)
+                    if level_view['type'] == 'dir_detail':
+                        self.draw_dir_detail_view(overlay_win, overlay_height, overlay_width, level_view, draw_selected_idx, draw_scroll_offset)
+                    elif level_view['type'] == 'file_detail':
+                        self.draw_file_detail_view(overlay_win, overlay_height, overlay_width, level_view, draw_selected_idx, draw_scroll_offset)
+
+                view = self.get_current_view()
                 self.draw_hint_bar(stdscr, view['type'])
 
             # Handle input
