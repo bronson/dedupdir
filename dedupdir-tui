@@ -991,7 +991,7 @@ class DedupdirTUI:
 
         if not display_list:
             win.addstr(2, 1, "No directories to display")
-            win.refresh()
+            win.noutrefresh()
             return
 
         # Column headers with full-width underline
@@ -1112,7 +1112,7 @@ class DedupdirTUI:
         # Draw scroll indicators
         self.draw_scroll_indicators(win, height, width, scroll_offset, len(display_list), display_height, content_start_y=2)
 
-        win.refresh()
+        win.noutrefresh()
 
     def draw_dir_detail_view(self, win, height, width, view, selected_idx, scroll_offset):
         """Draw directory detail view showing only files in that directory."""
@@ -1147,7 +1147,7 @@ class DedupdirTUI:
                 win.addstr(4, 1, "  (No files)")
             except curses.error:
                 pass
-            win.refresh()
+            win.noutrefresh()
             return
 
         # Display files
@@ -1209,7 +1209,7 @@ class DedupdirTUI:
         # Draw scroll indicators
         self.draw_scroll_indicators(win, height, width, scroll_offset, len(files), display_height, content_start_y=4)
 
-        win.refresh()
+        win.noutrefresh()
 
     def draw_file_detail_view(self, win, height, width, view, selected_idx, scroll_offset):
         """Draw file detail view showing all directories containing this file."""
@@ -1276,7 +1276,7 @@ class DedupdirTUI:
         # Draw scroll indicators
         self.draw_scroll_indicators(win, height, width, self.scroll_offset, len(dirs_with_file), display_height, content_start_y=4)
 
-        win.refresh()
+        win.noutrefresh()
     def draw_trash_pane(self, win, height, width):
         """Draw the trash viewer in full screen."""
         win.clear()
@@ -1300,7 +1300,7 @@ class DedupdirTUI:
             win.addstr(msg_y, 2, "Trash is empty", curses.A_DIM)
             if self.show_no_duplicates_message:
                 win.addstr(msg_y + 2, 2, "Press 'q' to quit.", curses.A_DIM)
-            win.refresh()
+            win.noutrefresh()
             return
 
         # Display trash items
@@ -1362,7 +1362,7 @@ class DedupdirTUI:
         # Draw scroll indicators
         self.draw_scroll_indicators(win, height, width, self.trash_offset, len(items), display_height, content_start_y=start_y)
 
-        win.refresh()
+        win.noutrefresh()
 
     def get_file_type(self, file_path):
         """Detect file type: 'text', 'image', 'binary'."""
@@ -1536,7 +1536,8 @@ class DedupdirTUI:
         # Draw scroll indicators
         self.draw_scroll_indicators(viewer_win, height, width, scroll_offset, len(content_lines), content_height, content_start_y=content_start_y)
 
-        viewer_win.refresh()
+        viewer_win.noutrefresh()
+        curses.doupdate()
         return scroll_offset, len(content_lines), max_offset
 
     def get_help_text(self, mode):
@@ -1669,7 +1670,8 @@ Actions:
         # Draw scroll indicators
         self.draw_scroll_indicators(help_win, height, width, scroll_offset, len(lines), visible_height, content_start_y=1, show_position=True)
 
-        help_win.refresh()
+        help_win.noutrefresh()
+        curses.doupdate()
         return scroll_offset, len(lines)
 
     def show_help_viewer(self, stdscr, mode):
@@ -1772,7 +1774,7 @@ Actions:
                 stdscr.addstr(height - 1, verify_x, verify_text, curses.A_DIM)
             # Draw help on right
             stdscr.addstr(height - 1, width - len(help_text) - 1, help_text, curses.A_DIM)
-            stdscr.refresh()  # Explicitly refresh to ensure hint bar is visible
+            stdscr.noutrefresh()
         except curses.error:
             pass  # Ignore errors at edge of screen
 
@@ -1869,7 +1871,7 @@ Actions:
         # Draw prompt
         dialog.addstr(dialog_height - 2, (dialog_width - len(prompt)) // 2, prompt, curses.A_REVERSE)
 
-        dialog.refresh()
+        dialog.noutrefresh()
         return dialog
 
     def handle_enter_key(self, view):
@@ -2069,8 +2071,14 @@ Actions:
         if file_path and file_path.is_file():
             self.open_file_with_system_app(file_path)
 
-    def draw_all_panes(self, usable_height, width):
-        """Draw all panes in the view stack with proper indentation and frozen selections."""
+    def draw_all_panes(self, usable_height, width, do_update=True):
+        """Draw all panes in the view stack with proper indentation and frozen selections.
+
+        Args:
+            usable_height: Available height for drawing
+            width: Available width for drawing
+            do_update: If True, call curses.doupdate() after drawing (default True)
+        """
         # First, draw the main view (always at bottom) with its saved selection
         main_win = curses.newwin(usable_height, width, 0, 0)
         main_view = self.view_stack[0]
@@ -2120,6 +2128,8 @@ Actions:
             elif level_view['type'] == 'file_detail':
                 self.draw_file_detail_view(overlay_win, overlay_height, overlay_width, level_view, draw_selected_idx, draw_scroll_offset)
 
+        if do_update:
+            curses.doupdate()
 
     def run(self, stdscr):
         """Main TUI loop."""
@@ -2182,30 +2192,34 @@ Actions:
                 trash_win = curses.newwin(trash_height, trash_width, trash_y, trash_x)
                 self.draw_trash_pane(trash_win, trash_height, trash_width)
                 self.draw_hint_bar(stdscr, 'trash')
+                curses.doupdate()
 
             elif self.confirm_quit:
                 # Draw quit confirmation dialog
-                self.draw_all_panes(usable_height, width)
+                self.draw_all_panes(usable_height, width, do_update=False)
                 message = "You have drilled down into the directory tree.\n\nAre you sure you want to quit?"
                 self.draw_confirmation_dialog(stdscr, message, "Quit? (y/n)")
                 self.draw_hint_bar(stdscr, 'confirm')
+                curses.doupdate()
 
             elif self.confirm_trash_item is not None:
                 # Draw confirmation dialog - draw all panes then overlay the dialog
-                self.draw_all_panes(usable_height, width)
+                self.draw_all_panes(usable_height, width, do_update=False)
 
                 # Draw confirmation dialog on top of all panes
                 rel_path = self.get_path_with_root(self.confirm_trash_item)
                 message = f"There is only one copy of\n\n{rel_path}\n\nIf you trash it, you will lose data."
                 self.draw_confirmation_dialog(stdscr, message, "Trash anyway? (y/n)")
                 self.draw_hint_bar(stdscr, 'confirm')
+                curses.doupdate()
 
             else:
                 # Normal view - draw all panes in the stack
-                self.draw_all_panes(usable_height, width)
+                self.draw_all_panes(usable_height, width, do_update=False)
 
                 view = self.get_current_view()
                 self.draw_hint_bar(stdscr, view['type'])
+                curses.doupdate()
 
             # Handle input
             key = stdscr.getch()
