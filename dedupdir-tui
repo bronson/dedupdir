@@ -914,7 +914,7 @@ class DedupdirTUI:
         scroll_range = total_items - visible_height
         if scroll_range > 0:
             scroll_ratio = scroll_offset / scroll_range
-            thumb_pos = int((scrollbar_height - thumb_size) * scroll_ratio)
+            thumb_pos = round((scrollbar_height - thumb_size) * scroll_ratio)
         else:
             thumb_pos = 0
 
