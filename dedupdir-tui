@@ -73,13 +73,14 @@ CACHE_FILE_NAME = dedupdir_module.CACHE_FILE_NAME
 
 
 class DedupdirTUI:
-    def __init__(self, root_paths, algorithm='blake2b', jobs=4):
+    def __init__(self, root_paths, algorithm='blake2b', jobs=4, use_cache=True):
         # Normalize to list
         if isinstance(root_paths, (str, Path)):
             root_paths = [root_paths]
         self.root_paths = [Path(p).resolve() for p in root_paths]
         self.algorithm = algorithm
         self.jobs = jobs
+        self.use_cache = use_cache
 
         # Navigation state
         self.selected_idx = 0
@@ -137,7 +138,8 @@ class DedupdirTUI:
             self.root_paths,
             algorithm=self.algorithm,
             jobs=self.jobs,
-            quiet=quiet
+            quiet=quiet,
+            use_cache=self.use_cache
         )
         self.dir_stats, self.total_duplicates, self.total_files, \
             self.file_to_hash, self.hash_to_dirs, self.dir_all_files, \
@@ -3126,6 +3128,11 @@ def main():
         metavar='N',
         help='Number of parallel hashing jobs (default: 4, use 1 to disable)'
     )
+    parser.add_argument(
+        '-C', '--no-cache',
+        action='store_true',
+        help='Do not create or use cache files'
+    )
 
     args = parser.parse_args()
 
@@ -3141,7 +3148,7 @@ def main():
             sys.exit(1)
         roots.append(root)
 
-    tui = DedupdirTUI(roots, algorithm=args.algorithm, jobs=args.jobs)
+    tui = DedupdirTUI(roots, algorithm=args.algorithm, jobs=args.jobs, use_cache=not args.no_cache)
 
     # Scan with progress output before starting TUI
     if len(roots) == 1:

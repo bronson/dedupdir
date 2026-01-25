@@ -4,6 +4,7 @@
 * convert the two-pane UI back to single-pane and simplify the file view
 * automatically collapse child dirs when they're 100% redundant
 * add automatic caching to speed up subsequent runs
+* also add the -C/--no-cache option to disable caching
 * confirm quitting unless you're at the top level
 * add scroll indicators to panes
 * can now 'o' on directories to open them in the platform viewer
