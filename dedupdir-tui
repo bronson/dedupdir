@@ -107,6 +107,7 @@ class DedupdirTUI:
         self._dir_sizes_cache = {}  # Cache for directory sizes to avoid repeated stat() calls
         self._relationship_cache = None  # Cache for parent-child relationships (expensive to compute)
         self._recursive_stats_cache = {}  # Cache for recursive directory stats
+        self._dir_contents_cache = {}  # Cache for get_all_files_with_counts results
 
         # Sort mode: 'redundancy', 'duplicates', 'total', 'path', 'size', 'mtime'
         self.sort_mode = 'redundancy'
@@ -284,6 +285,10 @@ class DedupdirTUI:
     def invalidate_recursive_stats_cache(self):
         """Invalidate the recursive stats cache."""
         self._recursive_stats_cache = {}
+
+    def invalidate_dir_contents_cache(self):
+        """Invalidate the directory contents cache."""
+        self._dir_contents_cache = {}
 
     def get_dir_size(self, dir_path):
         """Get total size of files in a directory (cached)."""
@@ -490,12 +495,22 @@ class DedupdirTUI:
         return sorted(dup_files)
 
     def get_all_files_with_counts(self, dir_path):
-        """Get list of all files in directory with count of dirs containing each.
+        """Get list of files and subdirectories in directory with redundancy info.
 
-        Returns list of (filename, dir_count, file_path) tuples, sorted by
-        dir_count descending (most duplicated first), then by filename.
+        Returns list of (display_name, count_or_stats, path, item_type) tuples.
+        - For files: (filename, dir_count, file_path, 'file')
+        - For dirs: (dirname, (dups, total), dir_path, 'dir')
+
+        Sorted with files first (by count desc), then directories (by redundancy).
+        Results are cached for performance.
         """
-        file_info = []
+        # Check cache first
+        if dir_path in self._dir_contents_cache:
+            return self._dir_contents_cache[dir_path]
+
+        items = []
+
+        # Get direct files in this directory
         for fpath in self.dir_all_files.get(dir_path, []):
             fname = fpath.name
             # Count how many directories contain this file (by hash)
@@ -505,11 +520,47 @@ class DedupdirTUI:
             else:
                 # Unique file (not hashed, only in this directory)
                 dir_count = 1
-            file_info.append((fname, dir_count, fpath))
+            items.append((fname, dir_count, fpath, 'file'))
 
-        # Sort by count descending, then by filename
-        file_info.sort(key=lambda x: (-x[1], x[0]))
-        return file_info
+        # Get immediate subdirectories (not all descendants, just direct children)
+        for other_dir in self.dir_all_files.keys():
+            if other_dir != dir_path and self.is_subdir(other_dir, dir_path):
+                # Check if it's a direct child (no intermediate directory in our list)
+                is_direct_child = True
+                for potential_parent in self.dir_all_files.keys():
+                    if (potential_parent != dir_path and
+                        potential_parent != other_dir and
+                        self.is_subdir(other_dir, potential_parent) and
+                        self.is_subdir(potential_parent, dir_path)):
+                        is_direct_child = False
+                        break
+
+                if is_direct_child:
+                    # Get recursive stats for this subdirectory
+                    dups, total = self.get_recursive_stats(other_dir)
+                    # Use relative name
+                    try:
+                        rel_name = other_dir.relative_to(dir_path)
+                        display_name = str(rel_name) + "/"
+                    except ValueError:
+                        display_name = other_dir.name + "/"
+                    items.append((display_name, (dups, total), other_dir, 'dir'))
+
+        # Sort: files first (by count desc), then directories (by redundancy % desc)
+        files = [(n, c, p, t) for n, c, p, t in items if t == 'file']
+        dirs = [(n, c, p, t) for n, c, p, t in items if t == 'dir']
+
+        files.sort(key=lambda x: (-x[1], x[0].lower()))
+        dirs.sort(key=lambda x: (-calculate_redundancy_score(x[1][0], x[1][1]) if x[1][1] > 0 else 0, x[0].lower()))
+
+        # Combine with divider between files and dirs (if both exist)
+        result = files
+        if files and dirs:
+            result.append(('--- Subdirectories ---', None, None, 'divider'))
+        result.extend(dirs)
+
+        self._dir_contents_cache[dir_path] = result
+        return result
 
     def get_dirs_containing_file(self, file_path):
         """Get list of directories that contain the given file (by hash)."""
@@ -896,6 +947,7 @@ class DedupdirTUI:
         self.invalidate_relationship_cache()
         self.invalidate_size_cache()
         self.invalidate_recursive_stats_cache()
+        self.invalidate_dir_contents_cache()
 
         return True
 
@@ -1008,6 +1060,7 @@ class DedupdirTUI:
         self.invalidate_relationship_cache()
         self.invalidate_size_cache()
         self.invalidate_recursive_stats_cache()
+        self.invalidate_dir_contents_cache()
 
         return True
 
@@ -1360,14 +1413,19 @@ class DedupdirTUI:
         except curses.error:
             pass
 
-        # Get files in this directory
-        files = self.get_all_files_with_counts(dir_path)
+        # Get files and subdirectories in this directory
+        items = self.get_all_files_with_counts(dir_path)
+        num_dirs = sum(1 for item in items if item[3] == 'dir')
+        num_files = sum(1 for item in items if item[3] == 'file')
 
         # Headers
         try:
-            win.addstr(2, 1, f"Files in Directory ({len(files)}):", curses.A_BOLD)
+            if num_dirs > 0:
+                win.addstr(2, 1, f"Contents ({num_dirs} dirs, {num_files} files):", curses.A_BOLD)
+            else:
+                win.addstr(2, 1, f"Files in Directory ({num_files}):", curses.A_BOLD)
             win.addstr(3, 1, " Copies", curses.A_BOLD | curses.A_UNDERLINE)
-            win.addstr(3, 10, "Filename", curses.A_BOLD | curses.A_UNDERLINE)
+            win.addstr(3, 10, "Name", curses.A_BOLD | curses.A_UNDERLINE)
             # Right-aligned headers
             if width > 50:
                 right_header = "Size  MTime"
@@ -1375,7 +1433,7 @@ class DedupdirTUI:
         except curses.error:
             pass
 
-        if not files:
+        if not items:
             try:
                 win.addstr(4, 1, "  (No files)")
             except curses.error:
@@ -1383,21 +1441,45 @@ class DedupdirTUI:
             win.noutrefresh()
             return
 
-        # Display files
+        # Display items (files and directories)
         display_height = height - 5  # Account for border, title, section header, column header
 
-        # Draw files (indicators will overlay first/last lines)
+        # Draw items (indicators will overlay first/last lines)
         for i in range(display_height):
             idx = scroll_offset + i
-            if idx >= len(files):
+            if idx >= len(items):
                 break
 
-            filename, count, file_path = files[idx]
-            count_col = f"{count:5d}"
+            name, count_or_stats, path, item_type = items[idx]
 
-            # Get file size
+            # Handle divider line
+            if item_type == 'divider':
+                divider_line = "─" * (width - 4)
+                y = i + 4
+                try:
+                    win.addstr(y, 1, divider_line, curses.A_DIM)
+                except curses.error:
+                    pass
+                continue
+
+            if item_type == 'dir':
+                # Directory entry - show redundancy stats
+                dups, total = count_or_stats
+                if total > 0:
+                    score = calculate_redundancy_score(dups, total)
+                    count_col = f"{score:5.0%}"
+                else:
+                    count_col = "    -"
+            else:
+                # File entry - show copy count
+                count_col = f"{count_or_stats:5d}"
+
+            # Get size
             try:
-                size_bytes = file_path.stat().st_size
+                if item_type == 'dir':
+                    size_bytes = self.get_dir_size(path)
+                else:
+                    size_bytes = path.stat().st_size
                 if size_bytes < 1024:
                     size_str = f"{size_bytes}B"
                 elif size_bytes < 1024 * 1024:
@@ -1409,10 +1491,10 @@ class DedupdirTUI:
             except:
                 size_str = "---"
 
-            mtime_str = self.format_mtime(file_path)
+            mtime_str = self.format_mtime(path)
 
-            # Left part: count and filename
-            left_part = f"{count_col}  {filename}"
+            # Left part: count/percent and name
+            left_part = f"{count_col}  {name}"
 
             # Right part: size and mtime
             right_part = f"{size_str:>6s}  {mtime_str}"
@@ -1433,14 +1515,15 @@ class DedupdirTUI:
                 line = left_part[:max_len-3] + "..."
 
             y = i + 4  # Start after headers
-            attr = curses.A_REVERSE if idx == selected_idx else curses.A_NORMAL
+            # Don't allow selection of divider line
+            attr = curses.A_REVERSE if (idx == selected_idx and item_type != 'divider') else curses.A_NORMAL
             try:
                 win.addstr(y, 1, line.ljust(width - 4), attr)  # Leave room for scroll bar
             except curses.error:
                 pass
 
         # Draw scroll indicators
-        self.draw_scroll_indicators(win, height, width, scroll_offset, len(files), display_height, content_start_y=4)
+        self.draw_scroll_indicators(win, height, width, scroll_offset, len(items), display_height, content_start_y=4)
 
         win.noutrefresh()
 
@@ -2175,13 +2258,20 @@ Actions:
                     self.invalidate_display_cache()
 
         elif view['type'] == 'dir_detail':
-            # Drilling into a file from directory view
+            # Drilling into a file or subdirectory from directory view
             dir_path = view['data']['dir_path']
-            files = self.get_all_files_with_counts(dir_path)
+            items = self.get_all_files_with_counts(dir_path)
 
-            if self.selected_idx < len(files):
-                filename, _, file_path = files[self.selected_idx]
-                self.push_view({'type': 'file_detail', 'data': {'file_path': file_path}})
+            if self.selected_idx < len(items):
+                name, count_or_stats, path, item_type = items[self.selected_idx]
+                if item_type == 'divider':
+                    pass  # Can't drill into divider
+                elif item_type == 'dir':
+                    # Drill into subdirectory
+                    self.push_view({'type': 'dir_detail', 'data': {'dir_path': path}})
+                elif item_type == 'file':
+                    # Drill into file
+                    self.push_view({'type': 'file_detail', 'data': {'file_path': path}})
 
         elif view['type'] == 'file_detail':
             # Drilling into a directory from file detail view
@@ -2203,6 +2293,30 @@ Actions:
         elif self.selected_idx >= list_size:
             self.selected_idx = list_size - 1
 
+    def skip_divider(self, direction):
+        """Skip over divider lines when navigating in dir_detail view.
+
+        Args:
+            direction: 1 for moving down, -1 for moving up
+        """
+        view = self.get_current_view()
+        if view['type'] != 'dir_detail':
+            return
+
+        dir_path = view['data']['dir_path']
+        items = self.get_all_files_with_counts(dir_path)
+
+        # If we landed on a divider, skip it
+        if self.selected_idx < len(items):
+            _, _, _, item_type = items[self.selected_idx]
+            if item_type == 'divider':
+                self.selected_idx += direction
+                # Clamp to valid range
+                if self.selected_idx < 0:
+                    self.selected_idx = 0
+                elif self.selected_idx >= len(items):
+                    self.selected_idx = len(items) - 1
+
     def handle_trash_key(self, view):
         """Handle 't' key - trash selected item."""
         item_to_trash = None
@@ -2220,14 +2334,15 @@ Actions:
                 # Can't trash a collapse line
 
         elif view['type'] == 'dir_detail':
-            # Trashing a file from directory view
+            # Trashing a file or subdirectory from directory view
             dir_path = view['data']['dir_path']
-            files = self.get_all_files_with_counts(dir_path)
+            items = self.get_all_files_with_counts(dir_path)
 
-            if self.selected_idx < len(files):
-                _, _, file_path = files[self.selected_idx]
-                item_to_trash = file_path
-                trash_type = 'file'
+            if self.selected_idx < len(items):
+                _, _, path, item_type = items[self.selected_idx]
+                if item_type != 'divider':
+                    item_to_trash = path
+                    trash_type = 'directory' if item_type == 'dir' else 'file'
 
         elif view['type'] == 'file_detail':
             # Trashing a directory from file detail view
@@ -2264,12 +2379,14 @@ Actions:
         file_path = None
 
         if view['type'] == 'dir_detail':
-            # Open file from directory view
+            # View file from directory view
             dir_path = view['data']['dir_path']
-            files = self.get_all_files_with_counts(dir_path)
+            items = self.get_all_files_with_counts(dir_path)
 
-            if self.selected_idx < len(files):
-                _, _, file_path = files[self.selected_idx]
+            if self.selected_idx < len(items):
+                _, _, path, item_type = items[self.selected_idx]
+                if item_type == 'file':
+                    file_path = path
 
         elif view['type'] == 'file_detail':
             # View the file itself
@@ -2344,13 +2461,13 @@ Actions:
                     path_to_open = dir_path
 
         elif view['type'] == 'dir_detail':
-            # Open file from directory view
+            # Open file or directory from directory view
             dir_path = view['data']['dir_path']
-            files = self.get_all_files_with_counts(dir_path)
+            items = self.get_all_files_with_counts(dir_path)
 
-            if self.selected_idx < len(files):
-                _, _, file_path = files[self.selected_idx]
-                path_to_open = file_path
+            if self.selected_idx < len(items):
+                _, _, path, item_type = items[self.selected_idx]
+                path_to_open = path
 
         elif view['type'] == 'file_detail':
             # Open directory from file detail view
@@ -2691,6 +2808,7 @@ Actions:
             elif key in (curses.KEY_UP, ord('k')):
                 if self.selected_idx > 0:
                     self.selected_idx -= 1
+                    self.skip_divider(-1)  # Skip divider if we landed on one
                     # If selection went off screen (above), scroll to show it
                     if self.selected_idx < self.scroll_offset:
                         self.scroll_offset = self.selected_idx
@@ -2700,6 +2818,7 @@ Actions:
             elif key in (curses.KEY_DOWN, ord('j')):
                 if self.selected_idx < list_size - 1:
                     self.selected_idx += 1
+                    self.skip_divider(1)  # Skip divider if we landed on one
                     visible_lines = self.get_current_visible_lines(usable_height)
                     last_visible_idx = self.scroll_offset + visible_lines - 1
                     more_below = self.scroll_offset + visible_lines < list_size
