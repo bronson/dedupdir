@@ -13,6 +13,7 @@
 * make the trash viewer hierarchical so it can handle lots of files
 * added 'P' key to promote (move) a single item to their parent
 * added '^R' key to reload and refresh all redundancy scores
+* added run_tests.py to provide some simple unit tests
 
 
 ## [0.1.0] - 2026-01-21
