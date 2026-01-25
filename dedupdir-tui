@@ -812,8 +812,32 @@ class DedupdirTUI:
         else:
             # Overlay views are indented by level_idx rows
             overlay_height = usable_height - level_idx
-            # dir_detail and file_detail both use height - 5 for display_height
-            return overlay_height - 5
+            if view['type'] == 'dir_detail':
+                # dir_detail uses height - 3 (title + header line + border)
+                return overlay_height - 3
+            else:
+                # file_detail uses height - 5
+                return overlay_height - 5
+
+    def format_stats_text(self, duplicate_files, total_files):
+        """Format stats as ' X files | Y dupes | Z% ' string."""
+        if total_files == 0:
+            return " 0 files | 0 dupes | 0% "
+
+        duplication_percent = (duplicate_files / total_files) * 100
+
+        if duplication_percent == 0.0:
+            percent_str = "0%"
+        elif duplication_percent < 0.01:
+            percent_str = "<0.01%"
+        elif duplication_percent < 1.0:
+            percent_str = f"{duplication_percent:.2f}%"
+        elif duplication_percent < 10.0:
+            percent_str = f"{duplication_percent:.1f}%"
+        else:
+            percent_str = f"{duplication_percent:.0f}%"
+
+        return f" {total_files} files | {duplicate_files} dupes | {percent_str} "
 
     def get_current_stats(self):
         """Calculate current statistics: total files, duplicate files, and duplication percentage.
@@ -1242,20 +1266,9 @@ class DedupdirTUI:
         win.border()
 
         # Show statistics in upper right corner
-        total_files, duplicate_files, duplication_percent = self.get_current_stats()
-        if duplication_percent == 0.0:
-            percent_str = "0%"
-        elif duplication_percent < 0.01:
-            percent_str = "<0.01%"
-        elif duplication_percent < 1.0:
-            percent_str = f"{duplication_percent:.2f}%"
-        elif duplication_percent < 10.0:
-            percent_str = f"{duplication_percent:.1f}%"
-        else:
-            percent_str = f"{duplication_percent:.0f}%"
-
-        stats_text = f" {total_files} files | {duplicate_files} dupes | {percent_str} "
-        stats_x = width - len(stats_text) - 1
+        total_files, duplicate_files, _ = self.get_current_stats()
+        stats_text = self.format_stats_text(duplicate_files, total_files)
+        stats_x = width - len(stats_text) - 2
         if stats_x > 2:
             try:
                 win.addstr(0, stats_x, stats_text, curses.A_DIM)
@@ -1407,42 +1420,44 @@ class DedupdirTUI:
         win.clear()
         win.border()
 
+        # Get files and subdirectories in this directory
+        items = self.get_all_files_with_counts(dir_path)
+
+        # Title bar: dir name on left, recursive stats on right
         title = f" {self.get_path_with_root(dir_path)}/ "
+        dups, total = self.get_recursive_stats(dir_path)
+        stats_text = self.format_stats_text(dups, total)
+        stats_x = width - len(stats_text) - 2
         try:
-            win.addstr(0, 2, title[:width-4], curses.A_BOLD)
+            win.addstr(0, 2, title[:stats_x-3], curses.A_BOLD)
+            if stats_x > len(title) + 2:
+                win.addstr(0, stats_x, stats_text, curses.A_DIM)
         except curses.error:
             pass
 
-        # Get files and subdirectories in this directory
-        items = self.get_all_files_with_counts(dir_path)
-        num_dirs = sum(1 for item in items if item[3] == 'dir')
-        num_files = sum(1 for item in items if item[3] == 'file')
-
-        # Headers
+        # Column headers on line 1 with full underline
+        header_line = 1
+        base_attr = curses.A_BOLD | curses.A_UNDERLINE
         try:
-            if num_dirs > 0:
-                win.addstr(2, 1, f"Contents ({num_dirs} dirs, {num_files} files):", curses.A_BOLD)
-            else:
-                win.addstr(2, 1, f"Files in Directory ({num_files}):", curses.A_BOLD)
-            win.addstr(3, 1, " Copies", curses.A_BOLD | curses.A_UNDERLINE)
-            win.addstr(3, 10, "Name", curses.A_BOLD | curses.A_UNDERLINE)
-            # Right-aligned headers
+            win.addstr(header_line, 1, " " * (width - 2), curses.A_UNDERLINE)
+            win.addstr(header_line, 1, " Copies", base_attr)
+            win.addstr(header_line, 10, "Name", base_attr)
             if width > 50:
-                right_header = "Size  MTime"
-                win.addstr(3, width - len(right_header) - 2, right_header, curses.A_BOLD | curses.A_UNDERLINE)
+                win.addstr(header_line, width - 13, "Size", base_attr)
+                win.addstr(header_line, width - 7, "MTime", base_attr)
         except curses.error:
             pass
 
         if not items:
             try:
-                win.addstr(4, 1, "  (No files)")
+                win.addstr(2, 1, "  (No files)")
             except curses.error:
                 pass
             win.noutrefresh()
             return
 
         # Display items (files and directories)
-        display_height = height - 5  # Account for border, title, section header, column header
+        display_height = height - 3  # Account for border, title, column header
 
         # Draw items (indicators will overlay first/last lines)
         for i in range(display_height):
@@ -1455,7 +1470,7 @@ class DedupdirTUI:
             # Handle divider line
             if item_type == 'divider':
                 divider_line = "─" * (width - 4)
-                y = i + 4
+                y = i + 2
                 try:
                     win.addstr(y, 1, divider_line, curses.A_DIM)
                 except curses.error:
@@ -1493,8 +1508,8 @@ class DedupdirTUI:
 
             mtime_str = self.format_mtime(path)
 
-            # Left part: count/percent and name
-            left_part = f"{count_col}  {name}"
+            # Left part: count/percent and name (4 spaces to align with "Name" header at col 10)
+            left_part = f"{count_col}    {name}"
 
             # Right part: size and mtime
             right_part = f"{size_str:>6s}  {mtime_str}"
@@ -1514,7 +1529,7 @@ class DedupdirTUI:
                 # Truncate left part
                 line = left_part[:max_len-3] + "..."
 
-            y = i + 4  # Start after headers
+            y = i + 2  # Start after headers
             # Don't allow selection of divider line
             attr = curses.A_REVERSE if (idx == selected_idx and item_type != 'divider') else curses.A_NORMAL
             try:
@@ -1523,7 +1538,7 @@ class DedupdirTUI:
                 pass
 
         # Draw scroll indicators
-        self.draw_scroll_indicators(win, height, width, scroll_offset, len(items), display_height, content_start_y=4)
+        self.draw_scroll_indicators(win, height, width, scroll_offset, len(items), display_height, content_start_y=2)
 
         win.noutrefresh()
 
