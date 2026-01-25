@@ -95,6 +95,7 @@ class DedupdirTUI:
         self.viewing_trash = False  # Whether we're in trash viewing mode
         self.trash_selected_idx = 0
         self.trash_offset = 0
+        self.trash_path_stack = []  # Stack of (trash_path, original_path, selected_idx, offset) for drill-down navigation
         self.confirm_trash_item = None  # Item pending confirmation
         self.confirm_trash_type = None  # 'file' or 'directory'
         self.confirm_quit = False  # Whether quit confirmation is pending
@@ -550,30 +551,156 @@ class DedupdirTUI:
             trash_dir.mkdir(parents=True)
         return trash_dir
 
-    def get_trash_items(self):
-        """Scan trash directories in all roots and return list of items with metadata."""
+    def get_trash_items(self, parent_path=None):
+        """Scan trash directories and return list of items.
+
+        If parent_path is None, shows top-level items from all roots.
+        If parent_path is specified, shows contents of that directory.
+        """
         items = []
 
+        if parent_path:
+            # Show contents of a specific directory
+            parent = Path(parent_path)
+            if not parent.exists() or not parent.is_dir():
+                return items
+
+            # Find the root this path belongs to
+            root_path = None
+            for rp in self.root_paths:
+                trash_dir = self.get_trash_dir_for_root(rp)
+                try:
+                    parent.relative_to(trash_dir)
+                    root_path = rp
+                    break
+                except ValueError:
+                    continue
+
+            if not root_path:
+                return items
+
+            trash_dir = self.get_trash_dir_for_root(root_path)
+
+            try:
+                for item in parent.iterdir():
+                    rel_to_trash = item.relative_to(trash_dir)
+                    original_path = root_path / rel_to_trash
+
+                    if item.is_file():
+                        try:
+                            size = item.stat().st_size
+                            timestamp = datetime.fromtimestamp(item.stat().st_ctime).isoformat()
+                        except:
+                            size = 0
+                            timestamp = ''
+
+                        items.append({
+                            'original_path': str(original_path),
+                            'trash_path': str(item),
+                            'root_name': root_path.name,
+                            'relative_path': str(rel_to_trash),
+                            'type': 'file',
+                            'size': size,
+                            'file_count': 1,
+                            'timestamp': timestamp
+                        })
+                    elif item.is_dir():
+                        file_count = 0
+                        total_size = 0
+                        latest_time = 0
+                        try:
+                            for f in item.rglob('*'):
+                                if f.is_file():
+                                    file_count += 1
+                                    try:
+                                        stat = f.stat()
+                                        total_size += stat.st_size
+                                        latest_time = max(latest_time, stat.st_ctime)
+                                    except:
+                                        pass
+                            if latest_time == 0:
+                                latest_time = item.stat().st_ctime
+                        except:
+                            pass
+
+                        items.append({
+                            'original_path': str(original_path),
+                            'trash_path': str(item),
+                            'root_name': root_path.name,
+                            'relative_path': str(rel_to_trash),
+                            'type': 'directory',
+                            'size': total_size,
+                            'file_count': file_count,
+                            'timestamp': datetime.fromtimestamp(latest_time).isoformat() if latest_time else ''
+                        })
+            except PermissionError:
+                pass
+
+            items.sort(key=lambda x: (x['type'] != 'directory', x['relative_path'].lower()))
+            return items
+
+        # Top-level: show items from all roots
         for root_path in self.root_paths:
             trash_dir = self.get_trash_dir_for_root(root_path)
             if not trash_dir.exists():
                 continue
 
-            # Walk through all files/dirs in this trash dir
-            for item in trash_dir.rglob('*'):
-                if item.is_file() or (item.is_dir() and not any(item.iterdir())):
-                    # It's a file or empty directory
+            # Only get top-level items in trash (not recursive)
+            try:
+                for item in trash_dir.iterdir():
                     rel_to_trash = item.relative_to(trash_dir)
                     original_path = root_path / rel_to_trash
 
-                    items.append({
-                        'original_path': str(original_path),
-                        'trash_path': str(item),
-                        'root_name': root_path.name,
-                        'relative_path': str(rel_to_trash),
-                        'type': 'file' if item.is_file() else 'directory',
-                        'timestamp': datetime.fromtimestamp(item.stat().st_ctime).isoformat()
-                    })
+                    if item.is_file():
+                        try:
+                            size = item.stat().st_size
+                            timestamp = datetime.fromtimestamp(item.stat().st_ctime).isoformat()
+                        except:
+                            size = 0
+                            timestamp = ''
+
+                        items.append({
+                            'original_path': str(original_path),
+                            'trash_path': str(item),
+                            'root_name': root_path.name,
+                            'relative_path': str(rel_to_trash),
+                            'type': 'file',
+                            'size': size,
+                            'file_count': 1,
+                            'timestamp': timestamp
+                        })
+                    elif item.is_dir():
+                        # Count files and total size in directory
+                        file_count = 0
+                        total_size = 0
+                        latest_time = 0
+                        try:
+                            for f in item.rglob('*'):
+                                if f.is_file():
+                                    file_count += 1
+                                    try:
+                                        stat = f.stat()
+                                        total_size += stat.st_size
+                                        latest_time = max(latest_time, stat.st_ctime)
+                                    except:
+                                        pass
+                            if latest_time == 0:
+                                latest_time = item.stat().st_ctime
+                        except:
+                            pass
+
+                        items.append({
+                            'original_path': str(original_path),
+                            'trash_path': str(item),
+                            'root_name': root_path.name,
+                            'relative_path': str(rel_to_trash),
+                            'type': 'directory',
+                            'size': total_size,
+                            'file_count': file_count,
+                            'timestamp': datetime.fromtimestamp(latest_time).isoformat() if latest_time else ''
+                        })
+            except PermissionError:
+                continue
 
         # Sort by timestamp (newest first)
         items.sort(key=lambda x: x['timestamp'], reverse=True)
@@ -1396,7 +1523,22 @@ class DedupdirTUI:
         win.clear()
         win.border()
 
-        title = " Trash (~dedupdir-trash) - 'r' restore, 'v' view, 't' toggle back, Esc exit "
+        # Show current path in title
+        if self.trash_path_stack:
+            current_trash_path, current_orig_path, _, _ = self.trash_path_stack[-1]
+            # Find root name for this path
+            for root_path in self.root_paths:
+                trash_dir = self.get_trash_dir_for_root(root_path)
+                try:
+                    rel_path = Path(current_trash_path).relative_to(trash_dir)
+                    title = f" Trash: {root_path.name}/{rel_path}/ "
+                    break
+                except ValueError:
+                    continue
+            else:
+                title = f" Trash: {Path(current_orig_path).name}/ "
+        else:
+            title = " Trash (~dedupdir-trash) "
         win.addstr(0, 2, title[:width-4], curses.A_BOLD | curses.A_REVERSE)
 
         # Show "no duplicates" message if applicable
@@ -1407,7 +1549,9 @@ class DedupdirTUI:
             except curses.error:
                 pass
 
-        items = self.get_trash_items()
+        # Get items for current level
+        current_trash_path = self.trash_path_stack[-1][0] if self.trash_path_stack else None
+        items = self.get_trash_items(current_trash_path)
 
         if not items:
             msg_y = 4 if self.show_no_duplicates_message else 2
@@ -1436,29 +1580,48 @@ class DedupdirTUI:
             rel_path = item.get('relative_path', 'unknown')
             root_name = item.get('root_name', '')
             timestamp = item.get('timestamp', '')[:19]  # YYYY-MM-DDTHH:MM:SS
+            file_count = item.get('file_count', 0)
+            size = item.get('size', 0)
 
-            # Format: [type] root/path with timestamp on right
+            # Format size
+            if size < 1024:
+                size_str = f"{size}B"
+            elif size < 1024 * 1024:
+                size_str = f"{size/1024:.1f}K"
+            elif size < 1024 * 1024 * 1024:
+                size_str = f"{size/(1024*1024):.1f}M"
+            else:
+                size_str = f"{size/(1024*1024*1024):.1f}G"
+
+            # Format: [type] root/path (with file count for dirs)
             type_icon = "📄" if item_type == "file" else "📁"
-            path_part = f"{type_icon} {root_name}/{rel_path}"
+            if item_type == "directory" and file_count > 0:
+                path_part = f"{type_icon} {root_name}/{rel_path}/ ({file_count} files)"
+            elif item_type == "directory":
+                path_part = f"{type_icon} {root_name}/{rel_path}/"
+            else:
+                path_part = f"{type_icon} {root_name}/{rel_path}"
 
             # Format timestamp as "MMM DD HH:MM" (e.g., "Jan 20 14:23")
-            # This is the ctime (inode change time), which approximates when the file was moved to trash
             if len(timestamp) >= 16:
                 try:
                     dt = datetime.fromisoformat(timestamp)
-                    time_part = dt.strftime("%b %d %H:%M")  # "Jan 20 14:23"
+                    time_part = dt.strftime("%b %d %H:%M")
                 except:
-                    time_part = timestamp[5:16]  # Fallback: "MM-DD HH:MM"
+                    time_part = timestamp[5:16]
             else:
                 time_part = timestamp
 
-            y = i + start_y + indicator_offset  # Account for top indicator if present
+            y = i + start_y + indicator_offset
             attr = curses.A_REVERSE if idx == self.trash_selected_idx else curses.A_NORMAL
 
             try:
+                # Right side: size and timestamp
+                right_part = f"{size_str:>7}  {time_part}"
+                right_width = len(right_part) + 2
+
                 # Calculate available space for path
-                timestamp_width = len(time_part) + 2  # Add padding
-                path_max_width = width - timestamp_width - 3
+                path_max_width = width - right_width - 3
 
                 # Truncate path if needed
                 if len(path_part) > path_max_width:
@@ -1467,9 +1630,9 @@ class DedupdirTUI:
                 # Draw path on left
                 win.addstr(y, 1, path_part, attr)
 
-                # Draw timestamp on right
-                time_x = width - timestamp_width - 1
-                win.addstr(y, time_x, time_part, attr | curses.A_DIM)
+                # Draw size and timestamp on right
+                right_x = width - right_width - 1
+                win.addstr(y, right_x, right_part, attr | curses.A_DIM)
             except curses.error:
                 pass
 
@@ -1849,7 +2012,10 @@ Actions:
         elif mode == 'file_detail':
             return "↑↓:Navigate  Enter:Drill Down  v:View  o:Open  t:Trash  Esc:Back"
         elif mode == 'trash':
-            return "↑↓:Navigate  v:View  o:Open  r:Restore  T:Back"
+            if self.trash_path_stack:
+                return "↑↓:Navigate  Enter:Open  r:Restore  v:View  o:Open  h/Esc:Back"
+            else:
+                return "↑↓:Navigate  Enter:Open  r:Restore  v:View  o:Open  Esc:Exit"
         elif mode == 'viewer':
             return "↑↓:Scroll  PgUp/PgDn:Page  q:Close"
         elif mode == 'confirm':
@@ -2403,10 +2569,35 @@ Actions:
                 elif key in (ord('T'),):
                     if not self.show_no_duplicates_message:
                         self.viewing_trash = False
+                        self.trash_path_stack = []  # Reset navigation
                     continue
                 elif key == 27:  # ESC
-                    if not self.show_no_duplicates_message:
+                    if self.trash_path_stack:
+                        # Go back up one level, restore previous selection
+                        _, _, saved_idx, saved_offset = self.trash_path_stack.pop()
+                        self.trash_selected_idx = saved_idx
+                        self.trash_offset = saved_offset
+                    elif not self.show_no_duplicates_message:
                         self.viewing_trash = False
+                    continue
+                elif key in (curses.KEY_LEFT, ord('h')):
+                    # Also allow h/left to go back
+                    if self.trash_path_stack:
+                        _, _, saved_idx, saved_offset = self.trash_path_stack.pop()
+                        self.trash_selected_idx = saved_idx
+                        self.trash_offset = saved_offset
+                    continue
+                elif key in (curses.KEY_ENTER, ord('\n'), ord('\r'), curses.KEY_RIGHT, ord('l')):
+                    # Drill down into directory
+                    current_trash_path = self.trash_path_stack[-1][0] if self.trash_path_stack else None
+                    items = self.get_trash_items(current_trash_path)
+                    if items and self.trash_selected_idx < len(items):
+                        item = items[self.trash_selected_idx]
+                        if item['type'] == 'directory':
+                            # Save current selection before drilling down
+                            self.trash_path_stack.append((item['trash_path'], item['original_path'], self.trash_selected_idx, self.trash_offset))
+                            self.trash_selected_idx = 0
+                            self.trash_offset = 0
                     continue
                 elif key == ord('?'):
                     self.show_help_viewer(stdscr, 'trash')
@@ -2426,18 +2617,25 @@ Actions:
                         if self.trash_selected_idx < self.trash_offset:
                             self.trash_offset = self.trash_selected_idx
                 elif key in (curses.KEY_DOWN, ord('j')):
-                    items = self.get_trash_items()
+                    current_trash_path = self.trash_path_stack[-1][0] if self.trash_path_stack else None
+                    items = self.get_trash_items(current_trash_path)
                     if self.trash_selected_idx < len(items) - 1:
                         self.trash_selected_idx += 1
                         if self.trash_selected_idx >= self.trash_offset + (height - 2):
                             self.trash_offset = self.trash_selected_idx - (height - 2) + 1
                 elif key in (ord('r'), ord('R')):
-                    items = self.get_trash_items()
+                    current_trash_path = self.trash_path_stack[-1][0] if self.trash_path_stack else None
+                    items = self.get_trash_items(current_trash_path)
                     if items and self.trash_selected_idx < len(items):
                         if self.restore_from_trash(items[self.trash_selected_idx]):
-                            items = self.get_trash_items()
+                            items = self.get_trash_items(current_trash_path)
                             if self.trash_selected_idx >= len(items) and len(items) > 0:
                                 self.trash_selected_idx = len(items) - 1
+                            # If current directory is now empty and we're drilled down, go back up
+                            if not items and self.trash_path_stack:
+                                _, _, saved_idx, saved_offset = self.trash_path_stack.pop()
+                                self.trash_selected_idx = saved_idx
+                                self.trash_offset = saved_offset
                             if self.show_no_duplicates_message and self.sorted_dirs:
                                 self.show_no_duplicates_message = False
                                 self.viewing_trash = False
@@ -2484,6 +2682,7 @@ Actions:
                     self.viewing_trash = True
                     self.trash_selected_idx = 0
                     self.trash_offset = 0
+                    self.trash_path_stack = []  # Start at top level
                 continue
 
             # U key - undo last trash
