@@ -884,33 +884,36 @@ class DedupdirTUI:
     def get_recursive_stats(self, dir_path):
         """Get stats including all files in subdirectories.
 
-        Returns (duplicates, total) counting all files recursively under dir_path.
+        Returns (duplicates, total) counting all UNIQUE files recursively under dir_path.
+        A file is counted as a duplicate if its hash appears in more than one directory.
         Uses caching for performance.
         """
         # Check cache first
         if dir_path in self._recursive_stats_cache:
             return self._recursive_stats_cache[dir_path]
 
-        total_dups = 0
-        total_files = 0
+        # Collect all unique files in this directory tree
+        all_files = set()
 
         # Include this directory's own files
-        if dir_path in self.dir_stats:
-            dups, total = self.dir_stats[dir_path]
-            total_dups += dups
-            total_files += total
-        elif dir_path in self.dir_all_files:
-            total_files += len(self.dir_all_files[dir_path])
+        for fpath in self.dir_all_files.get(dir_path, []):
+            all_files.add(fpath)
 
         # Include all subdirectories
         for other_dir in self.dir_all_files.keys():
             if other_dir != dir_path and self.is_subdir(other_dir, dir_path):
-                if other_dir in self.dir_stats:
-                    dups, total = self.dir_stats[other_dir]
-                    total_dups += dups
-                    total_files += total
-                else:
-                    total_files += len(self.dir_all_files[other_dir])
+                for fpath in self.dir_all_files.get(other_dir, []):
+                    all_files.add(fpath)
+
+        total_files = len(all_files)
+
+        # Count duplicates (files whose hash appears in more than one directory)
+        total_dups = 0
+        for fpath in all_files:
+            if fpath in self.file_to_hash:
+                fhash = self.file_to_hash[fpath]
+                if len(self.hash_to_dirs.get(fhash, set())) > 1:
+                    total_dups += 1
 
         result = (total_dups, total_files)
         self._recursive_stats_cache[dir_path] = result
