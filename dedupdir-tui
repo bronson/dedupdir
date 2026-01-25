@@ -947,7 +947,7 @@ class DedupdirTUI:
             return True
         return dups == total
 
-    def trash_item(self, item_path, item_type, add_to_stack=True):
+    def trash_item(self, item_path, item_type, add_to_stack=True, skip_recalc=False):
         """Move item to trash and update data structures.
 
         Args:
@@ -955,6 +955,8 @@ class DedupdirTUI:
             item_type: 'file' or 'directory'
             add_to_stack: If True, add to undo stack as single item.
                          If False, caller is responsible for stack management.
+            skip_recalc: If True, skip cache invalidation and recalculation.
+                        Caller must call invalidate_all_caches() and recalculate_sorted_dirs() afterwards.
 
         Returns:
             Tuple of (original_path_str, trash_path_str, is_dir) on success, None on failure.
@@ -1002,11 +1004,12 @@ class DedupdirTUI:
         else:  # directory
             self.remove_directory_from_data(item_path)
 
-        # Invalidate caches BEFORE recalculate (it uses get_recursive_stats which is cached)
-        self.invalidate_all_caches()
+        if not skip_recalc:
+            # Invalidate caches BEFORE recalculate (it uses get_recursive_stats which is cached)
+            self.invalidate_all_caches()
 
-        # Recalculate sorted_dirs with all directories
-        self.recalculate_sorted_dirs()
+            # Recalculate sorted_dirs with all directories
+            self.recalculate_sorted_dirs()
 
         return trash_record
 
@@ -2522,12 +2525,16 @@ Actions:
         """Trash multiple files as a single undo group."""
         group = []
         for fpath in file_paths:
-            record = self.trash_item(fpath, 'file', add_to_stack=False)
+            # Skip recalc for each file - we'll do it once at the end
+            record = self.trash_item(fpath, 'file', add_to_stack=False, skip_recalc=True)
             if record:
                 group.append(record)
 
         if group:
             self.trash_stack.append(group)
+            # Now do the expensive operations once
+            self.invalidate_all_caches()
+            self.recalculate_sorted_dirs()
 
         return len(group)
 

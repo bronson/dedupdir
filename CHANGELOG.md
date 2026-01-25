@@ -14,7 +14,7 @@
 * added 'P' key to promote (move) a single item to their parent
 * added '^R' key to reload and refresh all redundancy scores
 * added run_tests.py to provide some simple unit tests
-* added 'D' to trash all files with redundancy similar to the selected file
+* added 'D' to group trash similar files in the current directory
 
 ## [0.1.0] - 2026-01-21
 * Rename project from redundir to dedupdir.
